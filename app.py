@@ -729,12 +729,19 @@ components.html("""
 
         doc.body.appendChild(btn);
 
-        /* Keep icon / position in sync with sidebar state changes */
-        try {
-            new MutationObserver(function () {
-                updateBtn(btn);
-            }).observe(doc.body, { childList: true, subtree: true, attributes: true });
-        } catch (e) {}
+        /* ── Watch ONLY the sidebar's aria-expanded attribute.
+           IMPORTANT: never use { subtree:true, attributes:true } on doc.body —
+           that fires on every React re-render and jams the JS thread. ── */
+        var sb = doc.querySelector('section[data-testid="stSidebar"]');
+        if (sb) {
+            try {
+                new MutationObserver(function () { updateBtn(btn); })
+                    .observe(sb, { attributes: true, attributeFilter: ['aria-expanded'] });
+            } catch (e) {}
+        }
+
+        /* Light periodic sync every 1.5 s as a fallback for the above observer */
+        setInterval(function () { updateBtn(btn); }, 1500);
 
         updateBtn(btn);
     }
@@ -745,12 +752,12 @@ components.html("""
     } else {
         injectToggleBtn();
     }
-    /* Also retry a few times in case Streamlit re-renders the page */
+    /* Retry for Streamlit's async first render (5 × 1 s = 5 s, then stops) */
     var retries = 0;
     var retryT = setInterval(function () {
         injectToggleBtn();
-        if (++retries >= 10) clearInterval(retryT);
-    }, 800);
+        if (++retries >= 5) clearInterval(retryT);
+    }, 1000);
 })();
 </script>
 """, height=0, scrolling=False)
