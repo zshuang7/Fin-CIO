@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -540,6 +541,103 @@ iframe { background-color: #000 !important; }
 }
 </style>
 """, unsafe_allow_html=True)
+
+# ── Sidebar always-open enforcer (JavaScript) ──────────────────────────────────
+# CSS alone cannot reliably fix the expand button across all Streamlit versions
+# because Streamlit persists sidebar state in localStorage and the exact
+# data-testid for the expand strip changes between releases.
+# This component runs JS in the parent document to:
+#   1. Clear any stored sidebar-collapsed state from localStorage on every load
+#      → sidebar always opens expanded after refresh / first visit
+#   2. Directly style the expand strip with high-z-index + blue background
+#      → users can always see and click it after manually collapsing
+#   3. Watch for DOM mutations so the style re-applies whenever the sidebar
+#      state changes (MutationObserver)
+components.html("""
+<script>
+(function () {
+    var p = window.parent;
+    if (!p || !p.document) return;
+    var doc = p.document;
+
+    /* ── 1. Clear localStorage sidebar state on every page load ── */
+    try {
+        var ls = p.localStorage;
+        if (ls) {
+            Object.keys(ls).forEach(function (k) {
+                /* Streamlit stores sidebar prefs under keys containing
+                   "sidebar" (case-insensitive) */
+                if (/sidebar/i.test(k)) ls.removeItem(k);
+            });
+        }
+    } catch (e) {}
+
+    /* ── 2. Force expand button to be a visible blue pill ── */
+    var EXPAND_SELS = [
+        '[data-testid="collapsedControl"]',
+        '[data-testid="stSidebarCollapsedControl"]',
+        '[data-testid="stSidebarUserCollapsedControl"]',
+    ];
+
+    function styleExpandBtn() {
+        EXPAND_SELS.forEach(function (sel) {
+            var el = doc.querySelector(sel);
+            if (!el) return;
+            /* Force blue background so the strip is unmissable */
+            el.style.setProperty('background-color', '#2563eb', 'important');
+            el.style.setProperty('opacity', '1', 'important');
+            el.style.setProperty('visibility', 'visible', 'important');
+            el.style.setProperty('display', 'flex', 'important');
+            el.style.setProperty('z-index', '999999', 'important');
+            el.style.setProperty('min-width', '24px', 'important');
+            el.style.setProperty('border-radius', '0 8px 8px 0', 'important');
+            el.style.setProperty('cursor', 'pointer', 'important');
+            /* Make the SVG arrow white */
+            [].forEach.call(el.querySelectorAll('svg, path'), function (s) {
+                s.style.setProperty('fill', '#ffffff', 'important');
+                s.style.setProperty('color', '#ffffff', 'important');
+            });
+        });
+    }
+
+    /* ── 3. Also fix the in-sidebar collapse button ── */
+    function styleCollapseBtn() {
+        var btn = doc.querySelector('[data-testid="stSidebarCollapseButton"] button');
+        if (btn) {
+            btn.style.setProperty('background-color', '#1f2937', 'important');
+            btn.style.setProperty('border', '1px solid #4b5563', 'important');
+            btn.style.setProperty('border-radius', '6px', 'important');
+            btn.style.setProperty('opacity', '1', 'important');
+            btn.style.setProperty('visibility', 'visible', 'important');
+        }
+    }
+
+    /* Run immediately, then on a short interval for the first 15 s */
+    styleExpandBtn();
+    styleCollapseBtn();
+    var runs = 0;
+    var t = setInterval(function () {
+        styleExpandBtn();
+        styleCollapseBtn();
+        if (++runs >= 30) clearInterval(t);
+    }, 500);
+
+    /* Also re-run whenever the DOM changes (sidebar open/close transitions) */
+    try {
+        new MutationObserver(function () {
+            styleExpandBtn();
+            styleCollapseBtn();
+        }).observe(doc.body, { childList: true, subtree: true, attributes: true });
+    } catch (e) {}
+})();
+</script>
+""", height=0, scrolling=False)
+
+# Hide the 0-height component iframe from the layout
+st.markdown(
+    "<style>iframe[height='0']{display:none!important}</style>",
+    unsafe_allow_html=True,
+)
 
 # ── Session state ──────────────────────────────────────────────────────────────
 if "messages" not in st.session_state:
