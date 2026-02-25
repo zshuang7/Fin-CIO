@@ -57,62 +57,105 @@ class _StdoutCapture:
         sys.stdout = self._orig
 
 
-# ── Log line parser ────────────────────────────────────────────────────────────
-_AGENT_NAMES = ["QueryAnalyst", "MacroAgent", "CompanyAgent",
-                "NewsAgent", "ReportManager", "CIO"]
+# ── Thinking-display helpers ────────────────────────────────────────────────────
+# Maps agent name → (icon, step label shown in the live panel)
+_STEP_MAP: dict[str, tuple[str, str]] = {
+    "QueryAnalyst":  ("🔍", "Step 1 — Understanding your query"),
+    "MacroAgent":    ("🌐", "Step 2 — Macro & Sector Context"),
+    "CompanyAgent":  ("🏢", "Step 3 — Company Fundamentals"),
+    "NewsAgent":     ("📰", "Step 4 — News & Sentiment"),
+    "ReportManager": ("📄", "Generating Report"),
+    "CIO":           ("🧠", "Synthesizing CIO Recommendation"),
+}
 
-_SKIP_FRAGMENTS = [
+# Maps tool function name (substring) → friendly description
+_TOOL_MAP: dict[str, str] = {
+    "understand_query":      "Classifying query intent",
+    "web_search":            "Searching the web",
+    "finance_search":        "Searching financial databases",
+    "news_search":           "Fetching latest news",
+    "get_financial_summary": "Pulling price & valuation metrics",
+    "get_income_statement":  "Loading 3-year income statement",
+    "get_cash_flow":         "Loading cash flow & FCF",
+    "get_key_metrics":       "Computing key financial metrics",
+    "get_balance_sheet":     "Loading balance sheet",
+    "get_analyst_ratings":   "Fetching analyst consensus",
+    "get_earnings_surprise": "Checking EPS beat/miss history",
+    "get_company_news":      "Fetching company news",
+    "get_news_sentiment":    "Running AI sentiment scoring",
+    "get_company_overview":  "Loading company overview",
+    "get_earnings_history":  "Loading EPS history",
+    "get_macro_indicator":   "Fetching macro economic data",
+    "get_stock_news":        "Searching stock news",
+    "get_market_sentiment":  "Gauging market sentiment",
+    "save_full_report":      "Generating investment report",
+    "save_to_excel":         "Saving Excel report",
+    "save_to_pdf":           "Saving PDF report",
+}
+
+# Lines containing any of these are always dropped — no exceptions
+_SKIP_ALWAYS: list[str] = [
+    "WARNING", "ERROR", "CRITICAL", "DEBUG",
     "UserWarning", "DeprecationWarning", "FutureWarning",
     "site-packages", "warnings.warn", "stacklevel",
     "chrome_", "impersonate", "curl_cffi",
     "use_container_width", "will be removed",
-    "consider adding", "pip install", "subprocess",
-    "NotImplemented", "NativeCommandError",
-]
-
-_TOOL_KEYWORDS = [
-    "get_financial", "get_income", "get_cash", "get_balance",
-    "get_key_metrics", "get_analyst", "get_price_target",
-    "get_earnings", "get_company_news", "get_insider",
-    "get_news_sentiment", "get_company_overview", "get_macro",
-    "web_search", "finance_search", "news_search", "understand_query",
-    "get_stock_news", "get_market_sentiment", "save_full_report",
-    "save_to_excel", "save_to_pdf",
+    "pip install", "subprocess", "NotImplemented",
+    "NativeCommandError", 'Traceback', '  File "',
+    "raise_for_status", "requests.exceptions",
+    "HTTPError", "ConnectionError", "ReadTimeout",
+    "403 Client", "404 Not", "500 Internal",
+    "token=", "api_key=", "Authorization",
 ]
 
 
-def _parse_log(raw: str) -> str | None:
+def _parse_log(raw: str, seen_agents: set) -> str | None:
     """
-    Convert a raw stdout line to a readable UI string.
-    Returns None to suppress the line.
+    Whitelist-only log parser — only structured step/tool lines are emitted.
+    All framework internals, warnings, JSON blobs, and API noise are dropped.
+
+    Args:
+        raw:         Raw stdout line from the agent thread.
+        seen_agents: Mutable set tracking which phase headers have been shown
+                     in the current query; prevents duplicate step banners.
     """
-    if len(raw) < 4:
-        return None
-    lower = raw.lower()
-
-    # Suppress noise
-    if any(s.lower() in lower for s in _SKIP_FRAGMENTS):
-        return None
-    # Suppress pure box-drawing / separator lines
-    if all(c in "─│┌┐└┘├┤┬┴┼╔╗╚╝═╠╣╦╩╬ \t" for c in raw):
+    stripped = raw.strip()
+    if len(stripped) < 4:
         return None
 
-    # Agent transition header (e.g. "Running QueryAnalyst" / "MacroAgent:")
-    for name in _AGENT_NAMES:
-        if name in raw:
-            return f"**Agent → {name}**"
+    # Hard-skip: errors, warnings, framework internals, security-sensitive tokens
+    for fragment in _SKIP_ALWAYS:
+        if fragment in raw:
+            return None
 
-    # Tool calls
-    for kw in _TOOL_KEYWORDS:
-        if kw in raw:
-            call = raw.strip()[:120]
-            return f"  `tool: {call}`"
+    # Skip pure box-drawing / separator lines (Agno's pretty-print borders)
+    if all(c in "─│┌┐└┘├┤┬┴┼╔╗╚╝═╠╣╦╩╬━ \t" for c in stripped):
+        return None
 
-    # Very long dump → truncate
-    if len(raw) > 300:
-        return f"  _{raw[:160].strip()}..._"
+    # ── WHITELIST 1: Agent phase transitions ─────────────────────────────────
+    for name, (icon, label) in _STEP_MAP.items():
+        if name in stripped and name not in seen_agents:
+            seen_agents.add(name)
+            return f"\n{icon} **{label}**"
 
-    return raw.strip()
+    # ── WHITELIST 2: Tool invocations ────────────────────────────────────────
+    for kw, friendly in _TOOL_MAP.items():
+        if kw in stripped:
+            # Try to surface the ticker / query argument for context
+            arg_hint = ""
+            if "(" in stripped and ")" in stripped:
+                try:
+                    s = stripped.index("(") + 1
+                    e = stripped.index(")", s)
+                    cand = stripped[s:e].strip().strip("'\"")
+                    if cand and len(cand) <= 30 and " " not in cand:
+                        arg_hint = f"  `{cand}`"
+                except ValueError:
+                    pass
+            return f"  ↳ {friendly}{arg_hint}"
+
+    # Drop everything else — raw API responses, JSON, model output fragments
+    return None
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -517,41 +560,43 @@ if prompt:
         thread = threading.Thread(target=_run, daemon=True)
         thread.start()
 
-        # ── Live activity panel ────────────────────────────────────────────
+        # ── Live thinking panel ────────────────────────────────────────────
+        # seen_agents is reset per query so phase banners show fresh each time
+        seen_agents: set[str] = set()
+
         with st.status("Thinking...", expanded=True) as status_widget:
             activity_placeholder = st.empty()
             activity_lines: list[str] = []
 
             while thread.is_alive() or not stdout_q.empty():
                 changed = False
-                # Drain all available lines from the queue
                 while not stdout_q.empty():
                     raw = stdout_q.get_nowait()
-                    parsed = _parse_log(raw)
+                    parsed = _parse_log(raw, seen_agents)
                     if parsed:
                         activity_lines.append(parsed)
                         changed = True
 
                 if changed:
-                    # Show last 30 lines so old steps scroll away
-                    display = "\n\n".join(activity_lines[-30:])
+                    display = "\n\n".join(activity_lines[-40:])
                     activity_placeholder.markdown(display)
 
-                time.sleep(0.15)
+                time.sleep(0.12)
 
             thread.join(timeout=10)
 
             # Drain anything remaining after thread exits
             while not stdout_q.empty():
                 raw = stdout_q.get_nowait()
-                parsed = _parse_log(raw)
+                parsed = _parse_log(raw, seen_agents)
                 if parsed:
                     activity_lines.append(parsed)
             if activity_lines:
-                activity_placeholder.markdown("\n\n".join(activity_lines[-30:]))
+                activity_placeholder.markdown("\n\n".join(activity_lines[-40:]))
 
+            total_steps = len([l for l in activity_lines if "**Step" in l or "**Synthesizing" in l])
             status_widget.update(
-                label="Analysis complete",
+                label=f"Analysis complete  ({total_steps} steps)",
                 state="complete",
                 expanded=False,
             )
