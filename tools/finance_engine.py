@@ -18,11 +18,16 @@ can access it without redundant API calls.
 ════════════════════════════════════════════════════════════════════
 """
 
-import yfinance as yf
 from agno.utils.log import logger
 
 from tools.base_tool import BaseTool
 from state import get_state
+
+
+def _yf():
+    """Lazy-import yfinance so it is only loaded when a finance tool is actually called."""
+    import yfinance as yf  # noqa: PLC0415
+    return yf
 
 
 class FinanceEngine(BaseTool):
@@ -56,7 +61,7 @@ class FinanceEngine(BaseTool):
             ticker: Stock ticker symbol, e.g. 'TSLA'.
         """
         try:
-            info = yf.Ticker(ticker).info
+            info = _yf().Ticker(ticker).info
             state = get_state()
             state.ticker = ticker.upper()
             state.company_name = info.get("longName", ticker.upper())
@@ -96,7 +101,7 @@ class FinanceEngine(BaseTool):
             years:  Number of fiscal years (default 3).
         """
         try:
-            fin = yf.Ticker(ticker).financials
+            fin = _yf().Ticker(ticker).financials
             if fin is None or fin.empty:
                 return f"No income statement data for {ticker}."
             subset = fin.iloc[:, :years]
@@ -120,7 +125,7 @@ class FinanceEngine(BaseTool):
             years:  Number of fiscal years (default 3).
         """
         try:
-            bs = yf.Ticker(ticker).balance_sheet
+            bs = _yf().Ticker(ticker).balance_sheet
             if bs is None or bs.empty:
                 return f"No balance sheet data for {ticker}."
             subset = bs.iloc[:, :years]
@@ -143,7 +148,7 @@ class FinanceEngine(BaseTool):
             years:  Number of fiscal years (default 3).
         """
         try:
-            cf = yf.Ticker(ticker).cashflow
+            cf = _yf().Ticker(ticker).cashflow
             if cf is None or cf.empty:
                 return f"No cash flow data for {ticker}."
             subset = cf.iloc[:, :years]
@@ -166,7 +171,7 @@ class FinanceEngine(BaseTool):
             ticker: Stock ticker symbol.
         """
         try:
-            info = yf.Ticker(ticker).info
+            info = _yf().Ticker(ticker).info
             div_yield = info.get("dividendYield")
             profit_margin = info.get("profitMargins")
 

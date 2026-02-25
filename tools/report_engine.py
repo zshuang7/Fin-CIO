@@ -22,7 +22,6 @@ Reads from SharedState (populated by all other agents) and produces:
 import os
 from datetime import datetime
 
-import pandas as pd
 from agno.utils.log import logger
 
 from tools.base_tool import BaseTool
@@ -81,6 +80,7 @@ class ReportEngine(BaseTool):
             filename: Custom filename (auto-generated from ticker if omitted).
         """
         try:
+            import pandas as pd  # lazy import — only loaded when a report is requested
             state = get_state()
             if not filename:
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")

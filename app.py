@@ -933,7 +933,12 @@ st.markdown("AI-Powered Investment Research Assistant")
 st.divider()
 
 # ── Render conversation history ────────────────────────────────────────────────
-for msg in st.session_state.messages:
+# Only render the most recent 12 messages to keep browser memory low.
+# All messages are still stored in session_state and saved to disk for history.
+_render_msgs = st.session_state.messages[-12:]
+if len(st.session_state.messages) > 12:
+    st.caption(f"↑ {len(st.session_state.messages) - 12} earlier messages hidden — load from sidebar to view full history")
+for msg in _render_msgs:
     avatar = "👤" if msg["role"] == "user" else "🤖"
     with st.chat_message(msg["role"], avatar=avatar):
         st.markdown(msg["content"])
