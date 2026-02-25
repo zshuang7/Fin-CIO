@@ -396,7 +396,7 @@ input:focus, textarea:focus { border-color: #3b82f6 !important; outline: none !i
 }
 
 /* ═══════════════════════════════════════════════
-   BUTTONS
+   BUTTONS  (global)
 ═══════════════════════════════════════════════ */
 .stButton > button {
     background-color: #111 !important;
@@ -409,6 +409,38 @@ input:focus, textarea:focus { border-color: #3b82f6 !important; outline: none !i
 .stButton > button:hover {
     background-color: #1d4ed8 !important;
     border-color: #3b82f6 !important;
+    color: #ffffff !important;
+}
+
+/* ── Sidebar conversation history buttons — need higher specificity
+   because Streamlit Cloud may render these with a white default bg ── */
+section[data-testid="stSidebar"] .stButton > button {
+    background-color: #1a1a1a !important;
+    color: #d4d4d4 !important;
+    border: 1px solid #2e2e2e !important;
+    border-radius: 8px !important;
+    text-align: left !important;
+    font-weight: 400 !important;
+    padding: 6px 10px !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+}
+section[data-testid="stSidebar"] .stButton > button:hover {
+    background-color: #1d4ed8 !important;
+    border-color: #3b82f6 !important;
+    color: #ffffff !important;
+}
+
+/* Caption text under each conversation entry */
+section[data-testid="stSidebar"] .stCaption,
+section[data-testid="stSidebar"] .stCaption p {
+    color: #666 !important;
+    font-size: 10px !important;
+    margin-top: -6px !important;
+    margin-bottom: 4px !important;
+    padding-left: 2px !important;
+    line-height: 1.2 !important;
 }
 
 .stDownloadButton > button {
@@ -833,14 +865,15 @@ with st.sidebar:
             with col_btn:
                 active = c_id == st.session_state.conv_id
                 btn_label = f"**{label}**" if active else label
-                if st.button(btn_label, key=f"conv_{c_id}", width="stretch",
-                             help=f"{c_date}  ·  {len(c_msgs)//2} exchanges"):
+                if st.button(btn_label, key=f"conv_{c_id}", width="stretch"):
                     st.session_state.messages   = c_msgs
                     st.session_state.conv_id    = c_id
                     st.session_state.conv_title = conv.get("title", "")
                     st.rerun()
+                n_ex = len(c_msgs) // 2
+                st.caption(f"{c_date} · {n_ex} msg{'s' if n_ex != 1 else ''}")
             with col_del:
-                if st.button("🗑", key=f"del_{c_id}", help="Delete this conversation"):
+                if st.button("🗑", key=f"del_{c_id}"):
                     _delete_conv(c_id)
                     if c_id == st.session_state.conv_id:
                         st.session_state.messages   = []
