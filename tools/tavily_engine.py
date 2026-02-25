@@ -45,6 +45,7 @@ class TavilyEngine(BaseTool):
         self.register(self.web_search)
         self.register(self.finance_search)
         self.register(self.news_search)
+        self.register(self.wall_street_search)
 
     def _get_client(self):
         """Lazy-load Tavily client."""
@@ -227,6 +228,114 @@ class TavilyEngine(BaseTool):
         except Exception as e:
             logger.error(f"[tavily_engine] finance_search error: {e}")
             return f"Finance search error: {e}"
+
+    # ── Wall Street deep analyst search ──────────────────────────────────
+
+    def wall_street_search(self, ticker: str, context: str = "") -> str:
+        """
+        Deep-dive search for Wall Street analyst reports, price target changes,
+        and broker research notes for a specific ticker.
+        Uses search_depth='advanced' with targeted financial queries.
+
+        Args:
+            ticker:  Stock ticker (e.g. TSLA, NVDA, 0700.HK).
+            context: Optional extra context to refine the search
+                     (e.g. 'Goldman Sachs bull case' or 'EPS revision Q1 2025').
+        """
+        try:
+            client = self._get_client()
+            ticker = ticker.upper().strip()
+            from datetime import datetime
+            year = datetime.now().year
+
+            # Build a targeted analyst-report query
+            base = f"{ticker} analyst rating price target {year}"
+            if context:
+                base = f"{ticker} {context} analyst note {year}"
+
+            queries = [
+                base,
+                f"Goldman Sachs Morgan Stanley JPMorgan {ticker} research note {year}",
+                f"{ticker} upgrade downgrade overweight underweight {year}",
+            ]
+
+            all_results = []
+            seen_urls: set[str] = set()
+
+            for q in queries[:2]:   # 2 calls max to conserve quota
+                try:
+                    resp = client.search(
+                        _trim_query(q),
+                        search_depth="advanced",
+                        include_answer=True,
+                        max_results=5,
+                        topic="finance",
+                    )
+                    for r in resp.get("results") or []:
+                        url = r.get("url", "")
+                        if url not in seen_urls:
+                            seen_urls.add(url)
+                            all_results.append(r)
+                    # Use the AI answer from the first query
+                    if not hasattr(self, "_ws_answer"):
+                        self._ws_answer = resp.get("answer") or ""
+                except Exception:
+                    continue
+
+            answer = getattr(self, "_ws_answer", "")
+            if hasattr(self, "_ws_answer"):
+                del self._ws_answer   # reset for next call
+
+            lines = [
+                f"## Wall Street Deep Search — {ticker} (Tavily Advanced)\n",
+            ]
+            if answer:
+                lines += ["### AI Analyst Summary", f"  {answer}", ""]
+
+            # Classify results by broker mentions
+            broker_kw = ["Goldman", "Morgan", "JPMorgan", "Citi", "UBS",
+                         "Barclays", "BofA", "Wells Fargo", "Deutsche",
+                         "Jefferies", "Needham", "Wedbush", "RBC", "Cowen",
+                         "Piper", "Baird", "Bernstein", "Evercore"]
+
+            research, general = [], []
+            for r in all_results[:10]:
+                title = r.get("title", "")
+                is_research = any(b.lower() in title.lower() for b in broker_kw) or \
+                              any(kw in title.lower() for kw in
+                                  ["analyst", "rating", "price target", "upgrade",
+                                   "downgrade", "overweight", "pt ", "pt$"])
+                (research if is_research else general).append(r)
+
+            if research:
+                lines.append("### Broker Research Notes")
+                for r in research[:5]:
+                    date = (r.get("published_date") or "")[:10]
+                    title = r.get("title", "")
+                    url = r.get("url", "")
+                    snippet = (r.get("content") or "")[:180].replace("\n", " ")
+                    lines.append(f"  🏦 [{date}] {title}")
+                    lines.append(f"     › {snippet}...")
+                    lines.append(f"     Source: {url}")
+                lines.append("")
+
+            if general:
+                lines.append("### Related Market Coverage")
+                for r in general[:3]:
+                    date = (r.get("published_date") or "")[:10]
+                    title = r.get("title", "")
+                    url = r.get("url", "")
+                    lines.append(f"  📰 [{date}] {title}  —  {url}")
+
+            lines.append(
+                "\n  Confidence: MEDIUM (web-sourced; cross-verify price targets "
+                "with EODHD structured data)"
+            )
+            return "\n".join(lines)
+
+        except Exception as e:
+            logger.error(f"[tavily_engine] wall_street_search error: {e}")
+            return f"Wall Street search error for {ticker}: {e}"
 
     # ── News search ───────────────────────────────────────────────────────
 

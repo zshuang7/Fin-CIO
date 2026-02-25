@@ -108,12 +108,13 @@ class _StdoutCapture:
 # ── Thinking-display helpers ────────────────────────────────────────────────────
 # Maps agent name → (icon, step label shown in the live panel)
 _STEP_MAP: dict[str, tuple[str, str]] = {
-    "QueryAnalyst":  ("🔍", "Step 1 — Understanding your query"),
-    "MacroAgent":    ("🌐", "Step 2 — Macro & Sector Context"),
-    "CompanyAgent":  ("🏢", "Step 3 — Company Fundamentals"),
-    "NewsAgent":     ("📰", "Step 4 — News & Sentiment"),
-    "ReportManager": ("📄", "Generating Report"),
-    "CIO":           ("🧠", "Synthesizing CIO Recommendation"),
+    "QueryAnalyst":    ("🔍", "Step 1 — Understanding your query"),
+    "MacroAgent":      ("🌐", "Step 2 — Macro & Sector Context"),
+    "CompanyAgent":    ("🏢", "Step 3 — Company Fundamentals"),
+    "WallStreetAgent": ("🏦", "Step 4 — Wall Street Analyst Intelligence"),
+    "NewsAgent":       ("📰", "Step 5 — News & Sentiment"),
+    "ReportManager":   ("📄", "Generating Report"),
+    "CIO":             ("🧠", "Synthesizing CIO Recommendation"),
 }
 
 # Maps tool function name (substring) → friendly description
@@ -136,9 +137,13 @@ _TOOL_MAP: dict[str, str] = {
     "get_macro_indicator":   "Fetching macro economic data",
     "get_stock_news":        "Searching stock news",
     "get_market_sentiment":  "Gauging market sentiment",
-    "save_full_report":      "Generating investment report",
-    "save_to_excel":         "Saving Excel report",
-    "save_to_pdf":           "Saving PDF report",
+    "get_analyst_ratings":       "Fetching Wall Street consensus & targets",
+    "get_analyst_news":          "Scanning broker research mentions",
+    "get_wall_street_breakdown": "Running full Wall Street intelligence",
+    "wall_street_search":        "Deep-diving analyst reports (Tavily)",
+    "save_full_report":          "Generating investment report",
+    "save_to_excel":             "Saving Excel report",
+    "save_to_pdf":               "Saving PDF report",
 }
 
 # Lines containing any of these are always dropped — no exceptions

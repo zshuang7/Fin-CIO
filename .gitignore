@@ -17,6 +17,9 @@ reports/
 # ── Conversation history (private, never commit) ──────────────────────────────
 conversations/
 
+# ── EODHD API cache (local temp, no need to commit) ──────────────────────────
+cache/
+
 # ── Streamlit local config ────────────────────────────────────────────────────
 .streamlit/secrets.toml
 

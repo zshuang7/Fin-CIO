@@ -41,6 +41,7 @@ from tools.finnhub_engine import FinnhubEngine
 from tools.alpha_vantage_engine import AlphaVantageEngine
 from tools.news_engine import NewsEngine
 from tools.report_engine import ReportEngine
+from tools.eodhd_engine import EODHDEngine
 
 load_dotenv()
 
@@ -173,7 +174,56 @@ news_agent = Agent(
 )
 
 
-# ── Agent 4: ReportManager ────────────────────────────────────────────────────
+# ── Agent 4: WallStreetAgent ──────────────────────────────────────────────────
+
+wall_street_agent = Agent(
+    name="WallStreetAgent",
+    role="Institutional Research & Analyst Intelligence Specialist",
+    model=_chat_model(),
+    tools=[EODHDEngine(), TavilyEngine()],
+    instructions=[
+        "You are a senior sell-side research analyst synthesising Wall Street",
+        "institutional intelligence. Be ANALYTICAL — 250-350 words max.",
+        "",
+        "Multi-step retrieval (run in this order for EVERY ticker):",
+        "  Phase 1 — STRUCTURED DATA:",
+        "    Call: get_wall_street_breakdown(ticker)",
+        "    → Extracts: consensus rating, avg price target, Buy/Hold/Sell split,",
+        "      EPS estimates, valuation multiples from EODHD.",
+        "",
+        "  Phase 2 — DEEP CONTEXT:",
+        "    Call: wall_street_search(ticker, '<specific bank or theme if known>')",
+        "    → Finds: specific broker notes (Goldman, Morgan Stanley, JPMorgan etc.),",
+        "      recent upgrades/downgrades, PT changes, contrarian views.",
+        "",
+        "  Phase 3 — CROSS-VERIFY:",
+        "    Compare EODHD's avg target vs. individual targets found in Tavily.",
+        "    Flag any discrepancy > 15% as a DATA CONFLICT.",
+        "",
+        "Output the 'Mosaic' framework STRICTLY:",
+        "  ### 🏦 Wall Street Consensus",
+        "  - Rating: [Overweight/Neutral/Underweight] | Avg Target: $XX | # Analysts: N",
+        "  - Distribution: Buy=X | Hold=X | Sell=X",
+        "",
+        "  ### 📐 Mosaic Breakdown",
+        "  - **Fundamental Drivers**: Key EPS revision, margin change, or volume catalyst",
+        "    cited by analysts (with source bank if known).",
+        "  - **Optionality / Upside Cases**: Non-core segments or new business lines",
+        "    that analysts are valuing separately (e.g. FSD, Optimus, Energy).",
+        "  - **Contrarian Edge**: What the most bullish OR most bearish analyst is",
+        "    saying that differs from consensus. Cite source if available.",
+        "",
+        "  ### ✅ Confidence Score",
+        "  - EODHD data: HIGH (structured) | Tavily snippets: MEDIUM (web-sourced)",
+        "  - Any data conflict flagged: YES/NO + description",
+        "",
+        "Do NOT generate reports. Do NOT call yfinance or macro tools.",
+    ],
+    markdown=True,
+)
+
+
+# ── Agent 5: ReportManager ────────────────────────────────────────────────────
 
 report_manager = Agent(
     name="ReportManager",
@@ -197,7 +247,8 @@ cio_team = Team(
     name="CIO_FinancialAnalysisTeam",
     mode="coordinate",
     model=_reasoner_model(),
-    members=[query_analyst, macro_agent, company_agent, news_agent, report_manager],
+    members=[query_analyst, macro_agent, company_agent,
+             wall_street_agent, news_agent, report_manager],
     instructions=[
         "You are the Chief Investment Officer of a quantitative research firm.",
         "You are smart about routing — you do NOT call every agent every time.",
@@ -249,27 +300,31 @@ cio_team = Team(
         "ROUTING BY QUERY TYPE:",
         "",
         "  STOCK_ANALYSIS ('分析TSLA', 'Should I buy NVDA', '8306.T怎么样'):",
-        "    1. MacroAgent  — sector + macro context",
-        "    2. CompanyAgent — fundamentals (yfinance + Finnhub + AlphaVantage)",
-        "    3. NewsAgent    — headlines + AI sentiment (Finnhub first, then others)",
-        "    4. YOUR synthesis → BUY / HOLD / SELL",
-        "    ✘ Do NOT call ReportManager (user hasn't asked for a report)",
+        "    1. MacroAgent        — sector + macro context",
+        "    2. CompanyAgent      — fundamentals (yfinance + Finnhub + AlphaVantage)",
+        "    3. WallStreetAgent   — institutional consensus, price targets, broker notes",
+        "                           (EODHD Phase-1 + Tavily wall_street_search Phase-2)",
+        "    4. NewsAgent         — headlines + AI sentiment",
+        "    5. YOUR synthesis    → BUY / HOLD / SELL",
+        "    ✘ Do NOT call ReportManager unless user asked for a report",
+        "    ✘ For LEVEL 1-2 queries: skip WallStreetAgent to save time",
         "",
         "  MARKET_ANALYSIS ('港股今年', 'US market outlook'):",
         "    1. MacroAgent  — broad market + macro indicators",
         "    2. NewsAgent    — market-level news via Tavily",
         "    3. YOUR synthesis",
-        "    ✘ Skip CompanyAgent and ReportManager",
+        "    ✘ Skip CompanyAgent, WallStreetAgent, and ReportManager",
         "",
         "  HISTORICAL_ANALYSIS ('how's 2015 HK', '2020年美股崩盘'):",
         "    1. MacroAgent  — Tavily web_search for historical macro",
         "    2. NewsAgent    — Tavily web_search for historical events",
         "    3. YOUR synthesis — clearly state the year being discussed",
-        "    ✘ Skip CompanyAgent (yfinance has no historical market data)",
+        "    ✘ Skip CompanyAgent and WallStreetAgent (no historical structured data)",
         "    ✘ Skip ReportManager",
         "",
         "  COMPARISON ('TSLA vs AAPL'):",
-        "    Run STOCK_ANALYSIS for each ticker, then compare side-by-side.",
+        "    Run STOCK_ANALYSIS for each ticker (including WallStreetAgent),",
+        "    then compare side-by-side.",
         "",
         "  CONCEPT_EXPLANATION ('什么是P/E', 'explain DCF'):",
         "    Answer directly from knowledge. Skip ALL sub-agents.",
