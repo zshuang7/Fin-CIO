@@ -159,37 +159,54 @@ _SKIP_ALWAYS: list[str] = [
 
 def _parse_log(raw: str, seen_agents: set) -> str | None:
     """
-    Whitelist-only log parser — only structured step/tool lines are emitted.
-    All framework internals, warnings, JSON blobs, and API noise are dropped.
-
-    Args:
-        raw:         Raw stdout line from the agent thread.
-        seen_agents: Mutable set tracking which phase headers have been shown
-                     in the current query; prevents duplicate step banners.
+    Two-tier parser:
+      • Structured markers  (__agent__, __tool__, __text__) emitted by the
+        streaming _run() function — always handled first.
+      • Legacy stdout lines (fallback non-streaming path) — whitelist only.
+    Returns a markdown string to display, or None to suppress.
     """
+    # ── Tier 1: Structured stream markers ────────────────────────────────────
+    if raw.startswith("__agent__"):
+        name = raw[9:]
+        if name in _STEP_MAP and name not in seen_agents:
+            seen_agents.add(name)
+            icon, label = _STEP_MAP[name]
+            return f"\n{icon} **{label}**"
+        return None
+
+    if raw.startswith("__tool__"):
+        rest = raw[8:]
+        for kw, friendly in _TOOL_MAP.items():
+            if rest.startswith(kw):
+                arg = rest[len(kw):]          # e.g. "  `TSLA`"
+                return f"  ↳ {friendly}{arg}"
+        return None
+
+    if raw.startswith("__text__"):
+        text = raw[8:].strip()
+        if (len(text) >= 25
+                and not any(s in text for s in _SKIP_ALWAYS)
+                and not text.startswith(("{", "[", "http", "def ", "class ", "import "))
+                and not text.startswith("#")
+                and text.count("|") < 4):    # skip table rows
+            return f"  › {text[:150]}"
+        return None
+
+    # ── Tier 2: Legacy stdout (non-streaming fallback) ───────────────────────
     stripped = raw.strip()
     if len(stripped) < 4:
         return None
-
-    # Hard-skip: errors, warnings, framework internals, security-sensitive tokens
     for fragment in _SKIP_ALWAYS:
         if fragment in raw:
             return None
-
-    # Skip pure box-drawing / separator lines (Agno's pretty-print borders)
     if all(c in "─│┌┐└┘├┤┬┴┼╔╗╚╝═╠╣╦╩╬━ \t" for c in stripped):
         return None
-
-    # ── WHITELIST 1: Agent phase transitions ─────────────────────────────────
     for name, (icon, label) in _STEP_MAP.items():
         if name in stripped and name not in seen_agents:
             seen_agents.add(name)
             return f"\n{icon} **{label}**"
-
-    # ── WHITELIST 2: Tool invocations ────────────────────────────────────────
     for kw, friendly in _TOOL_MAP.items():
         if kw in stripped:
-            # Try to surface the ticker / query argument for context
             arg_hint = ""
             if "(" in stripped and ")" in stripped:
                 try:
@@ -201,8 +218,6 @@ def _parse_log(raw: str, seen_agents: set) -> str | None:
                 except ValueError:
                     pass
             return f"  ↳ {friendly}{arg_hint}"
-
-    # Drop everything else — raw API responses, JSON, model output fragments
     return None
 
 # ── Page config ────────────────────────────────────────────────────────────────
@@ -788,18 +803,75 @@ if prompt:
         result_q: queue.Queue = queue.Queue()
 
         def _run():
-            with _StdoutCapture(stdout_q):
+            """
+            Preferred path: Agno stream=True yields RunResponse chunks so we
+            can emit live step/tool/content markers to stdout_q.
+            Fallback: non-streaming with stdout capture (if streaming unsupported).
+            """
+            def _emit(msg: str) -> None:
+                stdout_q.put(msg)
+
+            def _scan_chunk(text: str, seen: set) -> None:
+                """Emit markers for any agent names / tool calls found in chunk."""
+                for name in _STEP_MAP:
+                    if name in text and name not in seen:
+                        seen.add(name)
+                        _emit(f"__agent__{name}")
+                for kw in _TOOL_MAP:
+                    if kw in text:
+                        arg = ""
+                        if "(" in text:
+                            try:
+                                s = text.index("(") + 1
+                                e = text.index(")", s)
+                                cand = text[s:e].strip().strip("'\"")
+                                if cand and len(cand) <= 30 and " " not in cand:
+                                    arg = f"  `{cand}`"
+                            except ValueError:
+                                pass
+                        _emit(f"__tool__{kw}{arg}")
+                        break   # one tool emit per chunk is enough
+
+            try:
+                team, _ = load_agents()
+                chunks: list[str] = []
+                stream_seen: set[str] = set()
+
+                # ── Streaming path ──────────────────────────────────────────
                 try:
-                    team, _ = load_agents()
-                    resp = team.run(full_query)
-                    content = (
-                        resp.content
-                        if hasattr(resp, "content") and resp.content
-                        else str(resp)
-                    )
-                    result_q.put(("ok", content))
-                except Exception as exc:
-                    result_q.put(("err", str(exc)))
+                    for chunk in team.run(full_query, stream=True):
+                        c = ""
+                        if hasattr(chunk, "content") and chunk.content:
+                            c = str(chunk.content)
+                            chunks.append(c)
+
+                        _scan_chunk(c, stream_seen)
+
+                        # Emit readable content lines for the thinking panel
+                        for line in c.split("\n"):
+                            line = line.strip()
+                            if (30 <= len(line) <= 160
+                                    and not any(s in line for s in _SKIP_ALWAYS)
+                                    and not line.startswith(("{", "[", "http"))
+                                    and line.count("|") < 4):
+                                _emit(f"__text__{line}")
+
+                    final = "".join(chunks).strip()
+                    result_q.put(("ok", final or "[No response generated]"))
+
+                except Exception:
+                    # ── Non-streaming fallback ──────────────────────────────
+                    with _StdoutCapture(stdout_q):
+                        resp = team.run(full_query)
+                        content = (
+                            resp.content
+                            if hasattr(resp, "content") and resp.content
+                            else str(resp)
+                        )
+                        result_q.put(("ok", content))
+
+            except Exception as exc:
+                result_q.put(("err", str(exc)))
 
         thread = threading.Thread(target=_run, daemon=True)
         thread.start()
@@ -838,9 +910,11 @@ if prompt:
             if activity_lines:
                 activity_placeholder.markdown("\n\n".join(activity_lines[-40:]))
 
-            total_steps = len([l for l in activity_lines if "**Step" in l or "**Synthesizing" in l])
+            n_steps = len([l for l in activity_lines if "**Step" in l or "**Synthesizing" in l or "**Generating" in l])
+            n_tools = len([l for l in activity_lines if l.strip().startswith("↳")])
+            summary = f"Analysis complete — {n_steps} agents · {n_tools} tool calls"
             status_widget.update(
-                label=f"Analysis complete  ({total_steps} steps)",
+                label=summary,
                 state="complete",
                 expanded=False,
             )
