@@ -344,15 +344,23 @@ input:focus, textarea:focus { border-color: #3b82f6 !important; outline: none !i
 }
 
 /* ═══════════════════════════════════════════════
-   CHAT INPUT
+   CHAT INPUT  — no blue border by default
 ═══════════════════════════════════════════════ */
 [data-testid="stChatInput"],
 [data-testid="stChatInput"] > div,
 [data-testid="stChatInput"] textarea {
     background-color: #111 !important;
     color: #ffffff !important;
-    border: 1px solid #3b82f6 !important;
+    border: 1px solid #2a2a2a !important;
     border-radius: 12px !important;
+    outline: none !important;
+    box-shadow: none !important;
+}
+[data-testid="stChatInput"] textarea:focus,
+[data-testid="stChatInput"]:focus-within {
+    border-color: #444 !important;
+    box-shadow: none !important;
+    outline: none !important;
 }
 [data-testid="stChatInput"] button {
     background-color: #1d4ed8 !important;
@@ -545,14 +553,67 @@ iframe { background-color: #000 !important; }
     border-color: #3b82f6 !important;
 }
 
-/* The expand strip that floats on the LEFT EDGE when sidebar is closed —
-   make it a visible blue tab so users always know it's there */
+/* The expand strip — keep it invisible; our floating ☰ button (injected
+   by JS below) handles reopen on all devices. */
 [data-testid="collapsedControl"],
 [data-testid="stSidebarCollapsedControl"] {
-    background-color: #1d4ed8 !important;
-    border-radius: 0 8px 8px 0 !important;
-    min-width: 20px !important;
-    z-index: 99999 !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+    width: 0 !important;
+}
+
+/* ═══════════════════════════════════════════════
+   MOBILE RESPONSIVE  (≤ 768 px)
+═══════════════════════════════════════════════ */
+@media screen and (max-width: 768px) {
+
+    /* Reduce content padding so text isn't clipped */
+    .block-container,
+    [data-testid="block-container"] {
+        padding-left: 0.6rem !important;
+        padding-right: 0.6rem !important;
+        padding-top: 3.5rem !important;   /* room for floating ☰ */
+        max-width: 100% !important;
+    }
+
+    /* Smaller headings */
+    h1 { font-size: 1.4rem !important; }
+    h2 { font-size: 1.05rem !important; }
+    h3 { font-size: 0.95rem !important; }
+
+    /* Touch-friendly buttons (Apple HIG: 44 px min) */
+    .stButton > button {
+        min-height: 44px !important;
+        font-size: 13px !important;
+        padding: 6px 10px !important;
+    }
+
+    /* Sidebar: full-width drawer on mobile */
+    section[data-testid="stSidebar"],
+    section[data-testid="stSidebar"] > div {
+        width: 82vw !important;
+        max-width: 300px !important;
+    }
+
+    /* Chat messages — tighter padding */
+    [data-testid="stChatMessage"],
+    [data-testid="stChatMessage"] > div {
+        padding: 8px 10px !important;
+        border-radius: 8px !important;
+    }
+
+    /* Chat input — stick to bottom, no extra margin */
+    [data-testid="stChatInput"] {
+        border-radius: 10px !important;
+    }
+
+    /* Status / thinking panel */
+    [data-testid="stStatus"] {
+        font-size: 12px !important;
+    }
+
+    /* Divider spacing */
+    hr { margin: 8px 0 !important; }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -575,75 +636,121 @@ components.html("""
     if (!p || !p.document) return;
     var doc = p.document;
 
-    /* ── 1. Clear localStorage sidebar state on every page load ── */
+    /* ── 1. Clear localStorage sidebar state so sidebar always opens expanded ── */
     try {
         var ls = p.localStorage;
         if (ls) {
             Object.keys(ls).forEach(function (k) {
-                /* Streamlit stores sidebar prefs under keys containing
-                   "sidebar" (case-insensitive) */
                 if (/sidebar/i.test(k)) ls.removeItem(k);
             });
         }
     } catch (e) {}
 
-    /* ── 2. Force expand button to be a visible blue pill ── */
-    var EXPAND_SELS = [
-        '[data-testid="collapsedControl"]',
-        '[data-testid="stSidebarCollapsedControl"]',
-        '[data-testid="stSidebarUserCollapsedControl"]',
-    ];
-
-    function styleExpandBtn() {
-        EXPAND_SELS.forEach(function (sel) {
-            var el = doc.querySelector(sel);
-            if (!el) return;
-            /* Force blue background so the strip is unmissable */
-            el.style.setProperty('background-color', '#2563eb', 'important');
-            el.style.setProperty('opacity', '1', 'important');
-            el.style.setProperty('visibility', 'visible', 'important');
-            el.style.setProperty('display', 'flex', 'important');
-            el.style.setProperty('z-index', '999999', 'important');
-            el.style.setProperty('min-width', '24px', 'important');
-            el.style.setProperty('border-radius', '0 8px 8px 0', 'important');
-            el.style.setProperty('cursor', 'pointer', 'important');
-            /* Make the SVG arrow white */
-            [].forEach.call(el.querySelectorAll('svg, path'), function (s) {
-                s.style.setProperty('fill', '#ffffff', 'important');
-                s.style.setProperty('color', '#ffffff', 'important');
-            });
-        });
+    /* ── 2. Inject a persistent floating ☰ toggle button ── */
+    function isSidebarOpen() {
+        var sb = doc.querySelector('section[data-testid="stSidebar"]');
+        if (!sb) return false;
+        /* Streamlit marks collapsed sidebar with aria-expanded=false or
+           by giving it a very small width */
+        var expanded = sb.getAttribute('aria-expanded');
+        if (expanded === 'false') return false;
+        if (expanded === 'true')  return true;
+        /* Fallback: check computed width */
+        var w = sb.getBoundingClientRect().width;
+        return w > 40;
     }
 
-    /* ── 3. Also fix the in-sidebar collapse button ── */
-    function styleCollapseBtn() {
-        var btn = doc.querySelector('[data-testid="stSidebarCollapseButton"] button');
-        if (btn) {
-            btn.style.setProperty('background-color', '#1f2937', 'important');
-            btn.style.setProperty('border', '1px solid #4b5563', 'important');
-            btn.style.setProperty('border-radius', '6px', 'important');
-            btn.style.setProperty('opacity', '1', 'important');
-            btn.style.setProperty('visibility', 'visible', 'important');
+    function clickSidebarToggle() {
+        /* When sidebar is open → click the collapse button inside it */
+        var collapseBtn = doc.querySelector(
+            '[data-testid="stSidebarCollapseButton"] button'
+        );
+        /* When sidebar is closed → click the expand strip (any variant) */
+        var expandBtn = (
+            doc.querySelector('[data-testid="collapsedControl"] button') ||
+            doc.querySelector('[data-testid="stSidebarCollapsedControl"] button') ||
+            doc.querySelector('[data-testid="stSidebarUserCollapsedControl"] button')
+        );
+        if (isSidebarOpen()) {
+            if (collapseBtn) collapseBtn.click();
+        } else {
+            if (expandBtn)   expandBtn.click();
         }
     }
 
-    /* Run immediately, then on a short interval for the first 15 s */
-    styleExpandBtn();
-    styleCollapseBtn();
-    var runs = 0;
-    var t = setInterval(function () {
-        styleExpandBtn();
-        styleCollapseBtn();
-        if (++runs >= 30) clearInterval(t);
-    }, 500);
+    function updateBtn(btn) {
+        var open = isSidebarOpen();
+        btn.title      = open ? 'Close sidebar' : 'Open sidebar';
+        btn.innerHTML  = open ? '✕' : '☰';
+        btn.style.left = open ? '-100px' : '8px'; /* hide when sidebar is open */
+    }
 
-    /* Also re-run whenever the DOM changes (sidebar open/close transitions) */
-    try {
-        new MutationObserver(function () {
-            styleExpandBtn();
-            styleCollapseBtn();
-        }).observe(doc.body, { childList: true, subtree: true, attributes: true });
-    } catch (e) {}
+    function injectToggleBtn() {
+        if (doc.getElementById('fa-sidebar-toggle')) return; /* already injected */
+
+        var btn = doc.createElement('button');
+        btn.id = 'fa-sidebar-toggle';
+        btn.innerHTML = '☰';
+        btn.title = 'Open sidebar';
+
+        var css = [
+            'position:fixed',
+            'top:8px',
+            'left:8px',
+            'z-index:9999999',
+            'width:36px',
+            'height:36px',
+            'border-radius:8px',
+            'border:none',
+            'background:#1d4ed8',
+            'color:#fff',
+            'font-size:17px',
+            'line-height:1',
+            'cursor:pointer',
+            'display:flex',
+            'align-items:center',
+            'justify-content:center',
+            'box-shadow:0 2px 10px rgba(0,0,0,0.5)',
+            'transition:background 0.15s,left 0.2s',
+        ].join(';');
+        btn.setAttribute('style', css);
+
+        btn.addEventListener('click', function () {
+            clickSidebarToggle();
+            /* Give Streamlit 300 ms to update the DOM, then refresh icon */
+            setTimeout(function () { updateBtn(btn); }, 300);
+        });
+        btn.addEventListener('mouseenter', function () {
+            btn.style.background = '#2563eb';
+        });
+        btn.addEventListener('mouseleave', function () {
+            btn.style.background = '#1d4ed8';
+        });
+
+        doc.body.appendChild(btn);
+
+        /* Keep icon / position in sync with sidebar state changes */
+        try {
+            new MutationObserver(function () {
+                updateBtn(btn);
+            }).observe(doc.body, { childList: true, subtree: true, attributes: true });
+        } catch (e) {}
+
+        updateBtn(btn);
+    }
+
+    /* Wait for the DOM to be ready, then inject */
+    if (doc.readyState === 'loading') {
+        doc.addEventListener('DOMContentLoaded', injectToggleBtn);
+    } else {
+        injectToggleBtn();
+    }
+    /* Also retry a few times in case Streamlit re-renders the page */
+    var retries = 0;
+    var retryT = setInterval(function () {
+        injectToggleBtn();
+        if (++retries >= 10) clearInterval(retryT);
+    }, 800);
 })();
 </script>
 """, height=0, scrolling=False)
