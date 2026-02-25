@@ -265,8 +265,12 @@ html, body {
     color: #ffffff !important;
 }
 
-/* Sidebar — unified surface color */
-section[data-testid="stSidebar"],
+/* Sidebar — outer border on the section only; NO border on inner wrappers
+   (inner border-right creates phantom vertical lines next to columns/buttons) */
+section[data-testid="stSidebar"] {
+    background-color: #0d0d0d !important;
+    border-right: 1px solid #1e1e1e !important;
+}
 section[data-testid="stSidebar"] > div,
 section[data-testid="stSidebar"] [data-testid="stVerticalBlock"],
 section[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"],
@@ -274,7 +278,7 @@ section[data-testid="stSidebar"] [data-testid="stHorizontalBlock"],
 section[data-testid="stSidebar"] [data-testid="column"],
 section[data-testid="stSidebar"] .element-container {
     background-color: #0d0d0d !important;
-    border-right: 1px solid #1e1e1e !important;
+    border: none !important;   /* no inner borders — prevents vertical lines */
 }
 /* Sidebar form controls — subtle, no heavy box */
 section[data-testid="stSidebar"] input,
@@ -359,9 +363,12 @@ input:focus, textarea:focus { border-color: #3b82f6 !important; outline: none !i
 }
 
 /* ═══════════════════════════════════════════════
-   CHAT INPUT  — single outer border only, no inner frame
+   CHAT INPUT  — single outer border, zero inner frames
+   The global [data-baseweb="textarea"] textarea rule gives
+   the inner textarea its own border+border-radius — we nuke
+   everything inside stChatInput with the * selector so no
+   inner frame can bleed through regardless of source.
 ═══════════════════════════════════════════════ */
-/* Outer wrapper gets THE border */
 [data-testid="stChatInput"] {
     background-color: #111 !important;
     border: 1px solid #2a2a2a !important;
@@ -373,23 +380,17 @@ input:focus, textarea:focus { border-color: #3b82f6 !important; outline: none !i
     border-color: #444 !important;
     box-shadow: none !important;
 }
-/* Every inner element: transparent + no border — avoids the inner frame */
-[data-testid="stChatInput"] > div,
-[data-testid="stChatInput"] div,
-[data-testid="stChatInput"] [data-baseweb="base-input"],
-[data-testid="stChatInput"] [data-baseweb="textarea"],
-[data-testid="stChatInput"] textarea {
+/* Nuclear: strip every border/shadow/radius from every child
+   (excludes the send button so it keeps its own bg) */
+[data-testid="stChatInput"] *:not(button):not(svg):not(path) {
     background-color: transparent !important;
     border: none !important;
     outline: none !important;
     box-shadow: none !important;
     border-radius: 0 !important;
-    color: #ffffff !important;
 }
-[data-testid="stChatInput"] textarea:focus {
-    border: none !important;
-    outline: none !important;
-    box-shadow: none !important;
+[data-testid="stChatInput"] textarea {
+    color: #ffffff !important;
 }
 [data-testid="stChatInput"] button {
     background-color: #1d4ed8 !important;
@@ -687,21 +688,120 @@ iframe { background-color: #000 !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Sidebar localStorage reset (JavaScript) ────────────────────────────────────
-# Clears Streamlit's persisted sidebar-collapsed state from localStorage so the
-# sidebar always opens expanded on page load / refresh.
-# The blue ☰ expand button is handled entirely by CSS above (no JS click
-# trickery needed — the native Streamlit button is styled and fully clickable).
+# ── Sidebar toggle (JavaScript) ────────────────────────────────────────────────
+# Two-layer approach for maximum reliability across Streamlit versions:
+#  1. CSS (above) styles the native expand button as a blue ☰ — works when
+#     Streamlit's testid matches one of the three known variants.
+#  2. JS (here) injects a guaranteed-present floating ☰ button as fallback.
+#     When clicked it uses p.MouseEvent (cross-frame reliable) to click the
+#     native button, falling back to a page reload if nothing is found.
+#     The reload always opens the sidebar because localStorage is cleared first.
 components.html("""
 <script>
 (function () {
+    var p = window.parent;
+    if (!p || !p.document) return;
+    var doc = p.document;
+
+    /* ── 1. Clear localStorage sidebar state (sidebar opens expanded on reload) ── */
     try {
-        var ls = window.parent && window.parent.localStorage;
-        if (!ls) return;
-        Object.keys(ls).forEach(function (k) {
-            if (/sidebar/i.test(k)) ls.removeItem(k);
-        });
+        var ls = p.localStorage;
+        if (ls) {
+            Object.keys(ls).forEach(function (k) {
+                if (/sidebar/i.test(k)) ls.removeItem(k);
+            });
+        }
     } catch (e) {}
+
+    /* ── 2. Sidebar state helper ── */
+    function isSidebarOpen() {
+        var sb = doc.querySelector('section[data-testid="stSidebar"]');
+        if (!sb) return true;
+        var aria = sb.getAttribute('aria-expanded');
+        if (aria === 'false') return false;
+        if (aria === 'true')  return true;
+        return sb.getBoundingClientRect().width > 50;
+    }
+
+    /* ── 3. Try every known method to open the sidebar ── */
+    function tryOpen() {
+        var selectors = [
+            '[data-testid="collapsedControl"] button',
+            '[data-testid="stSidebarCollapsedControl"] button',
+            '[data-testid="stSidebarUserCollapsedControl"] button',
+            '[data-testid*="CollapsedControl"] button',
+        ];
+        for (var i = 0; i < selectors.length; i++) {
+            var el = doc.querySelector(selectors[i]);
+            if (el && el.id !== 'fa-sb-open') {
+                try {
+                    /* Use parent window's MouseEvent — cross-frame reliable */
+                    el.dispatchEvent(new p.MouseEvent('click', {
+                        bubbles: true, cancelable: true, view: p
+                    }));
+                } catch (_) { try { el.click(); } catch (_2) {} }
+                return;
+            }
+        }
+        /* Hard fallback: reload — sidebar opens expanded because localStorage is clear */
+        p.location.reload();
+    }
+
+    /* ── 4. Inject / sync the floating ☰ button ── */
+    function syncBtn(btn) {
+        btn.style.display = isSidebarOpen() ? 'none' : 'flex';
+    }
+
+    function injectBtn() {
+        if (doc.getElementById('fa-sb-open')) return;
+        var btn = doc.createElement('button');
+        btn.id = 'fa-sb-open';
+        btn.innerHTML = '&#9776;';  /* ☰ */
+        btn.title = 'Open sidebar';
+        btn.setAttribute('style', [
+            'position:fixed',
+            'top:8px', 'left:8px',
+            'z-index:2147483647',
+            'width:38px', 'height:38px',
+            'background:#1d4ed8',
+            'color:#fff',
+            'border:none',
+            'border-radius:8px',
+            'font-size:18px',
+            'cursor:pointer',
+            'display:none',
+            'align-items:center',
+            'justify-content:center',
+            'box-shadow:0 2px 10px rgba(0,0,0,0.6)',
+            'transition:background 0.15s',
+        ].join(';'));
+        btn.addEventListener('click', function () {
+            tryOpen();
+            setTimeout(function () { syncBtn(btn); }, 500);
+        });
+        btn.addEventListener('mouseenter', function () { btn.style.background = '#2563eb'; });
+        btn.addEventListener('mouseleave', function () { btn.style.background = '#1d4ed8'; });
+        doc.body.appendChild(btn);
+
+        /* Watch ONLY sidebar aria-expanded — targeted, never the whole DOM */
+        var sb = doc.querySelector('section[data-testid="stSidebar"]');
+        if (sb) {
+            try {
+                new MutationObserver(function () { syncBtn(btn); })
+                    .observe(sb, { attributes: true, attributeFilter: ['aria-expanded'] });
+            } catch (_) {}
+        }
+        setInterval(function () { syncBtn(btn); }, 1000);
+        syncBtn(btn);
+    }
+
+    if (doc.readyState !== 'loading') injectBtn();
+    else doc.addEventListener('DOMContentLoaded', injectBtn);
+
+    var n = 0, t = setInterval(function () {
+        injectBtn();
+        if (++n >= 5) clearInterval(t);
+    }, 1000);
 })();
 </script>
 """, height=0, scrolling=False)
