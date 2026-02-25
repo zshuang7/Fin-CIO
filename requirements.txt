@@ -1,0 +1,28 @@
+# Web UI
+streamlit>=1.35.0
+
+# Core agent framework
+agno>=1.3.0
+
+# LLM routing
+litellm>=1.55.0
+
+# Financial data
+yfinance>=0.2.54
+
+# Report generation
+pandas>=2.2.0
+openpyxl>=3.1.5
+reportlab>=4.2.5
+
+# Environment & utilities
+python-dotenv>=1.0.1
+
+# DuckDuckGo search backend (required by agno's DuckDuckGoTools)
+ddgs>=9.0.0
+
+# Tavily AI search (query understanding + grounded web search)
+tavily-python>=0.5.0
+
+# HTTP client for Finnhub + Alpha Vantage direct API calls
+requests>=2.31.0

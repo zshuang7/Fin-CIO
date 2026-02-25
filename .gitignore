@@ -1,0 +1,29 @@
+# ── Secrets — NEVER commit ────────────────────────────────────────────────────
+.env
+*.env
+
+# ── Python cache ──────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# ── Generated reports (local output) ─────────────────────────────────────────
+reports/
+*.xlsx
+*.pdf
+
+# ── Streamlit local config ────────────────────────────────────────────────────
+.streamlit/secrets.toml
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+
+# ── Editor / OS artefacts ─────────────────────────────────────────────────────
+.cursor_memory.md
+launch.bat
+.DS_Store
+Thumbs.db
