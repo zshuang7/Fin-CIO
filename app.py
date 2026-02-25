@@ -434,35 +434,21 @@ def load_agents():
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("## Configuration")
+    st.markdown("## FinAgent CIO")
     st.divider()
 
+    # Model selector — only DeepSeek options are available (same API key).
+    # To unlock GPT-4o or other providers, add the corresponding API key to
+    # st.secrets (Streamlit Cloud) or .env (local).
     model_options = {
         "DeepSeek Chat (fast)":        "deepseek/deepseek-chat",
         "DeepSeek Reasoner R1 (deep)": "deepseek/deepseek-reasoner",
-        "OpenAI GPT-4o":               "openai/gpt-4o",
-        "OpenAI GPT-4o Mini":          "openai/gpt-4o-mini",
     }
-    chosen_label = st.selectbox("CIO Brain Model", list(model_options.keys()), index=0)
+    chosen_label = st.selectbox("AI Model", list(model_options.keys()), index=0)
     chosen_model = model_options[chosen_label]
 
-    api_key_input = st.text_input(
-        "API Key",
-        value=os.getenv("DEEPSEEK_API_KEY", ""),
-        type="password",
-        help="DeepSeek: platform.deepseek.com  |  OpenAI: platform.openai.com",
-    )
-
+    # Reports output folder (local only — not used on Streamlit Cloud)
     output_dir = st.text_input("Reports Folder", value="reports")
-
-    st.divider()
-    st.markdown("### Active Tools")
-    try:
-        from tools import get_tool_names
-        for t in get_tool_names():
-            st.markdown(f"- `{t}`")
-    except Exception:
-        st.markdown("_(loading...)_")
 
     st.divider()
     st.markdown("### Quick Examples")
@@ -487,22 +473,15 @@ with st.sidebar:
 
 # ── Apply config ───────────────────────────────────────────────────────────────
 def _apply_config():
-    if api_key_input:
-        if "deepseek" in chosen_model:
-            os.environ["DEEPSEEK_API_KEY"] = api_key_input
-        else:
-            os.environ["OPENAI_API_KEY"] = api_key_input
+    # API keys are read exclusively from .env (local) or st.secrets (Streamlit Cloud).
+    # They are never accepted from the UI to prevent accidental exposure.
     os.environ["MODEL_ID"] = chosen_model
     os.environ["REASONING_MODEL_ID"] = chosen_model
 
 
 # ── Header ─────────────────────────────────────────────────────────────────────
 st.markdown("# FinAgent CIO")
-st.markdown(
-    "AI Investment Research Assistant &nbsp;·&nbsp; "
-    "DeepSeek · LiteLLM · Agno &nbsp;·&nbsp; "
-    "yfinance · Finnhub · Alpha Vantage · Tavily"
-)
+st.markdown("AI-Powered Investment Research Assistant")
 st.divider()
 
 # ── Render conversation history ────────────────────────────────────────────────
