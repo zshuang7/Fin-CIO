@@ -451,51 +451,92 @@ hr { border-color: #1f1f1f !important; margin: 16px 0; }
 ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #555; }
 
-/* Streamlit top bar */
+/* Streamlit top bar — background only; do NOT set color on * to avoid
+   bleeding white into the sidebar toggle icons */
 header[data-testid="stHeader"] {
     background-color: #000000 !important;
     border-bottom: 1px solid #111 !important;
 }
-header[data-testid="stHeader"] * { color: #ffffff !important; }
 
-/* Tool menu / hamburger */
+/* Hide only the branding / share toolbar, not the sidebar toggle */
 [data-testid="stToolbar"] { display: none !important; }
 
 /* iframe overlays that can carry white bg */
 iframe { background-color: #000 !important; }
 
 /* ═══════════════════════════════════════════════
-   SIDEBAR TOGGLE — always visible, never hidden
+   SIDEBAR TOGGLE BUTTONS
+   Use [data-testid*=] (contains) so this works
+   across ALL Streamlit versions regardless of
+   whether the testid is "collapsedControl",
+   "stSidebarCollapseButton", or
+   "stSidebarCollapsedControl".
 ═══════════════════════════════════════════════ */
-/* Collapse button (inside open sidebar) */
+
+/* ── Any element whose testid contains "Collapse" or "collapsed" ── */
+[data-testid*="Collapse"],
+[data-testid*="collapsed"],
+[data-testid*="CollapseButton"],
+[data-testid="collapsedControl"],
 [data-testid="stSidebarCollapseButton"],
-[data-testid="stSidebarCollapseButton"] button {
-    background-color: #1a1a1a !important;
-    border: 1px solid #333 !important;
+[data-testid="stSidebarCollapsedControl"] {
+    opacity: 1 !important;
+    visibility: visible !important;
+    display: flex !important;
+    pointer-events: auto !important;
+    /* Dark pill so the white arrow is always legible */
+    background-color: #1f1f1f !important;
+    border-radius: 6px !important;
+}
+
+/* The actual <button> elements inside those wrappers */
+[data-testid*="Collapse"] button,
+[data-testid*="collapsed"] button,
+[data-testid="collapsedControl"] button,
+[data-testid="stSidebarCollapseButton"] button,
+[data-testid="stSidebarCollapsedControl"] button {
+    background-color: #1f1f1f !important;
+    border: 1px solid #444 !important;
     border-radius: 6px !important;
     opacity: 1 !important;
     visibility: visible !important;
     display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    pointer-events: auto !important;
+    cursor: pointer !important;
 }
-/* Expand button (the arrow shown when sidebar is collapsed) */
-[data-testid="collapsedControl"],
-[data-testid="collapsedControl"] button {
-    background-color: #1a1a1a !important;
-    border: 1px solid #444 !important;
-    border-radius: 0 6px 6px 0 !important;
-    opacity: 1 !important;
-    visibility: visible !important;
-    display: flex !important;
-}
+
+/* Make SVG arrows / chevrons always white and visible */
+[data-testid*="Collapse"] svg,
+[data-testid*="collapsed"] svg,
+[data-testid="collapsedControl"] svg,
 [data-testid="stSidebarCollapseButton"] svg,
-[data-testid="collapsedControl"] svg {
+[data-testid="stSidebarCollapsedControl"] svg {
     fill: #ffffff !important;
     color: #ffffff !important;
+    opacity: 1 !important;
+    visibility: visible !important;
 }
-[data-testid="stSidebarCollapseButton"]:hover button,
-[data-testid="collapsedControl"]:hover button {
-    background-color: #2a2a2a !important;
-    border-color: #666 !important;
+
+/* Hover state */
+[data-testid*="Collapse"] button:hover,
+[data-testid*="collapsed"] button:hover,
+[data-testid="collapsedControl"] button:hover,
+[data-testid="stSidebarCollapseButton"] button:hover,
+[data-testid="stSidebarCollapsedControl"] button:hover {
+    background-color: #2563eb !important;
+    border-color: #3b82f6 !important;
+}
+
+/* The expand strip that floats on the LEFT EDGE when sidebar is closed —
+   make it a visible blue tab so users always know it's there */
+[data-testid="collapsedControl"],
+[data-testid="stSidebarCollapsedControl"] {
+    background-color: #1d4ed8 !important;
+    border-radius: 0 8px 8px 0 !important;
+    min-width: 20px !important;
+    z-index: 99999 !important;
 }
 </style>
 """, unsafe_allow_html=True)
