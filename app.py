@@ -265,12 +265,27 @@ html, body {
     color: #ffffff !important;
 }
 
-/* Sidebar */
+/* Sidebar — unified surface color */
 section[data-testid="stSidebar"],
 section[data-testid="stSidebar"] > div,
-section[data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
-    background-color: #0a0a0a !important;
-    border-right: 1px solid #222 !important;
+section[data-testid="stSidebar"] [data-testid="stVerticalBlock"],
+section[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"],
+section[data-testid="stSidebar"] [data-testid="stHorizontalBlock"],
+section[data-testid="stSidebar"] [data-testid="column"],
+section[data-testid="stSidebar"] .element-container {
+    background-color: #0d0d0d !important;
+    border-right: 1px solid #1e1e1e !important;
+}
+/* Sidebar form controls — subtle, no heavy box */
+section[data-testid="stSidebar"] input,
+section[data-testid="stSidebar"] [data-baseweb="select"] > div,
+section[data-testid="stSidebar"] [data-baseweb="base-input"] {
+    background-color: #161616 !important;
+    border: 1px solid #272727 !important;
+    border-radius: 6px !important;
+}
+section[data-testid="stSidebar"] input:focus {
+    border-color: #3b82f6 !important;
 }
 
 /* ═══════════════════════════════════════════════
@@ -344,23 +359,37 @@ input:focus, textarea:focus { border-color: #3b82f6 !important; outline: none !i
 }
 
 /* ═══════════════════════════════════════════════
-   CHAT INPUT  — no blue border by default
+   CHAT INPUT  — single outer border only, no inner frame
 ═══════════════════════════════════════════════ */
-[data-testid="stChatInput"],
-[data-testid="stChatInput"] > div,
-[data-testid="stChatInput"] textarea {
+/* Outer wrapper gets THE border */
+[data-testid="stChatInput"] {
     background-color: #111 !important;
-    color: #ffffff !important;
     border: 1px solid #2a2a2a !important;
     border-radius: 12px !important;
     outline: none !important;
     box-shadow: none !important;
 }
-[data-testid="stChatInput"] textarea:focus,
 [data-testid="stChatInput"]:focus-within {
     border-color: #444 !important;
     box-shadow: none !important;
+}
+/* Every inner element: transparent + no border — avoids the inner frame */
+[data-testid="stChatInput"] > div,
+[data-testid="stChatInput"] div,
+[data-testid="stChatInput"] [data-baseweb="base-input"],
+[data-testid="stChatInput"] [data-baseweb="textarea"],
+[data-testid="stChatInput"] textarea {
+    background-color: transparent !important;
+    border: none !important;
     outline: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    color: #ffffff !important;
+}
+[data-testid="stChatInput"] textarea:focus {
+    border: none !important;
+    outline: none !important;
+    box-shadow: none !important;
 }
 [data-testid="stChatInput"] button {
     background-color: #1d4ed8 !important;
