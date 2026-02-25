@@ -521,77 +521,85 @@ header[data-testid="stHeader"] {
 iframe { background-color: #000 !important; }
 
 /* ═══════════════════════════════════════════════
-   SIDEBAR TOGGLE BUTTONS
-   Use [data-testid*=] (contains) so this works
-   across ALL Streamlit versions regardless of
-   whether the testid is "collapsedControl",
-   "stSidebarCollapseButton", or
-   "stSidebarCollapsedControl".
+   SIDEBAR — COLLAPSE BUTTON  ("«" inside the open sidebar)
+   Style ONLY the <button> element, NOT the wrapper div —
+   styling the wrapper div creates phantom dark boxes inside
+   the sidebar content area.
 ═══════════════════════════════════════════════ */
-
-/* ── Any element whose testid contains "Collapse" or "collapsed" ── */
-[data-testid*="Collapse"],
-[data-testid*="collapsed"],
-[data-testid*="CollapseButton"],
-[data-testid="collapsedControl"],
-[data-testid="stSidebarCollapseButton"],
-[data-testid="stSidebarCollapsedControl"] {
-    opacity: 1 !important;
-    visibility: visible !important;
-    display: flex !important;
-    pointer-events: auto !important;
-    /* Dark pill so the white arrow is always legible */
+[data-testid="stSidebarCollapseButton"] button {
     background-color: #1f1f1f !important;
+    border: 1px solid #333 !important;
     border-radius: 6px !important;
-}
-
-/* The actual <button> elements inside those wrappers */
-[data-testid*="Collapse"] button,
-[data-testid*="collapsed"] button,
-[data-testid="collapsedControl"] button,
-[data-testid="stSidebarCollapseButton"] button,
-[data-testid="stSidebarCollapsedControl"] button {
-    background-color: #1f1f1f !important;
-    border: 1px solid #444 !important;
-    border-radius: 6px !important;
-    opacity: 1 !important;
-    visibility: visible !important;
-    display: flex !important;
-    align-items: center !important;
-    justify-content: center !important;
     pointer-events: auto !important;
     cursor: pointer !important;
+    opacity: 1 !important;
 }
-
-/* Make SVG arrows / chevrons always white and visible */
-[data-testid*="Collapse"] svg,
-[data-testid*="collapsed"] svg,
-[data-testid="collapsedControl"] svg,
-[data-testid="stSidebarCollapseButton"] svg,
-[data-testid="stSidebarCollapsedControl"] svg {
+[data-testid="stSidebarCollapseButton"] svg {
     fill: #ffffff !important;
     color: #ffffff !important;
-    opacity: 1 !important;
-    visibility: visible !important;
 }
-
-/* Hover state */
-[data-testid*="Collapse"] button:hover,
-[data-testid*="collapsed"] button:hover,
-[data-testid="collapsedControl"] button:hover,
-[data-testid="stSidebarCollapseButton"] button:hover,
-[data-testid="stSidebarCollapsedControl"] button:hover {
+[data-testid="stSidebarCollapseButton"] button:hover {
     background-color: #2563eb !important;
     border-color: #3b82f6 !important;
 }
 
-/* The expand strip — keep it invisible; our floating ☰ button (injected
-   by JS below) handles reopen on all devices. */
+/* ═══════════════════════════════════════════════
+   SIDEBAR — EXPAND BUTTON  (appears when sidebar is collapsed)
+   Convert it into a prominent fixed blue ☰ button in the
+   top-left corner.  Covers all known data-testid variants:
+     collapsedControl               (legacy Streamlit)
+     stSidebarCollapsedControl      (Streamlit 1.x)
+     stSidebarUserCollapsedControl  (Streamlit 1.3x+)
+═══════════════════════════════════════════════ */
 [data-testid="collapsedControl"],
-[data-testid="stSidebarCollapsedControl"] {
-    opacity: 0 !important;
-    pointer-events: none !important;
-    width: 0 !important;
+[data-testid="stSidebarCollapsedControl"],
+[data-testid="stSidebarUserCollapsedControl"] {
+    position: fixed !important;
+    top: 6px !important;
+    left: 6px !important;
+    z-index: 9999998 !important;
+    width: 38px !important;
+    height: 38px !important;
+    background: #1d4ed8 !important;
+    border-radius: 8px !important;
+    opacity: 1 !important;
+    pointer-events: auto !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.5) !important;
+}
+[data-testid="collapsedControl"] button,
+[data-testid="stSidebarCollapsedControl"] button,
+[data-testid="stSidebarUserCollapsedControl"] button {
+    background: transparent !important;
+    border: none !important;
+    width: 38px !important;
+    height: 38px !important;
+    pointer-events: auto !important;
+    cursor: pointer !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 0 !important;
+    margin: 0 !important;
+}
+/* Hide native SVG chevron, replace with ☰ text via ::after */
+[data-testid="collapsedControl"] svg,
+[data-testid="stSidebarCollapsedControl"] svg,
+[data-testid="stSidebarUserCollapsedControl"] svg { display: none !important; }
+[data-testid="collapsedControl"] button::after,
+[data-testid="stSidebarCollapsedControl"] button::after,
+[data-testid="stSidebarUserCollapsedControl"] button::after {
+    content: "☰";
+    font-size: 18px;
+    color: #ffffff;
+    line-height: 1;
+}
+[data-testid="collapsedControl"]:hover,
+[data-testid="stSidebarCollapsedControl"]:hover,
+[data-testid="stSidebarUserCollapsedControl"]:hover {
+    background: #2563eb !important;
 }
 
 /* ═══════════════════════════════════════════════
@@ -650,146 +658,21 @@ iframe { background-color: #000 !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Sidebar always-open enforcer (JavaScript) ──────────────────────────────────
-# CSS alone cannot reliably fix the expand button across all Streamlit versions
-# because Streamlit persists sidebar state in localStorage and the exact
-# data-testid for the expand strip changes between releases.
-# This component runs JS in the parent document to:
-#   1. Clear any stored sidebar-collapsed state from localStorage on every load
-#      → sidebar always opens expanded after refresh / first visit
-#   2. Directly style the expand strip with high-z-index + blue background
-#      → users can always see and click it after manually collapsing
-#   3. Watch for DOM mutations so the style re-applies whenever the sidebar
-#      state changes (MutationObserver)
+# ── Sidebar localStorage reset (JavaScript) ────────────────────────────────────
+# Clears Streamlit's persisted sidebar-collapsed state from localStorage so the
+# sidebar always opens expanded on page load / refresh.
+# The blue ☰ expand button is handled entirely by CSS above (no JS click
+# trickery needed — the native Streamlit button is styled and fully clickable).
 components.html("""
 <script>
 (function () {
-    var p = window.parent;
-    if (!p || !p.document) return;
-    var doc = p.document;
-
-    /* ── 1. Clear localStorage sidebar state so sidebar always opens expanded ── */
     try {
-        var ls = p.localStorage;
-        if (ls) {
-            Object.keys(ls).forEach(function (k) {
-                if (/sidebar/i.test(k)) ls.removeItem(k);
-            });
-        }
+        var ls = window.parent && window.parent.localStorage;
+        if (!ls) return;
+        Object.keys(ls).forEach(function (k) {
+            if (/sidebar/i.test(k)) ls.removeItem(k);
+        });
     } catch (e) {}
-
-    /* ── 2. Inject a persistent floating ☰ toggle button ── */
-    function isSidebarOpen() {
-        var sb = doc.querySelector('section[data-testid="stSidebar"]');
-        if (!sb) return false;
-        /* Streamlit marks collapsed sidebar with aria-expanded=false or
-           by giving it a very small width */
-        var expanded = sb.getAttribute('aria-expanded');
-        if (expanded === 'false') return false;
-        if (expanded === 'true')  return true;
-        /* Fallback: check computed width */
-        var w = sb.getBoundingClientRect().width;
-        return w > 40;
-    }
-
-    function clickSidebarToggle() {
-        /* When sidebar is open → click the collapse button inside it */
-        var collapseBtn = doc.querySelector(
-            '[data-testid="stSidebarCollapseButton"] button'
-        );
-        /* When sidebar is closed → click the expand strip (any variant) */
-        var expandBtn = (
-            doc.querySelector('[data-testid="collapsedControl"] button') ||
-            doc.querySelector('[data-testid="stSidebarCollapsedControl"] button') ||
-            doc.querySelector('[data-testid="stSidebarUserCollapsedControl"] button')
-        );
-        if (isSidebarOpen()) {
-            if (collapseBtn) collapseBtn.click();
-        } else {
-            if (expandBtn)   expandBtn.click();
-        }
-    }
-
-    function updateBtn(btn) {
-        var open = isSidebarOpen();
-        btn.title      = open ? 'Close sidebar' : 'Open sidebar';
-        btn.innerHTML  = open ? '✕' : '☰';
-        btn.style.left = open ? '-100px' : '8px'; /* hide when sidebar is open */
-    }
-
-    function injectToggleBtn() {
-        if (doc.getElementById('fa-sidebar-toggle')) return; /* already injected */
-
-        var btn = doc.createElement('button');
-        btn.id = 'fa-sidebar-toggle';
-        btn.innerHTML = '☰';
-        btn.title = 'Open sidebar';
-
-        var css = [
-            'position:fixed',
-            'top:8px',
-            'left:8px',
-            'z-index:9999999',
-            'width:36px',
-            'height:36px',
-            'border-radius:8px',
-            'border:none',
-            'background:#1d4ed8',
-            'color:#fff',
-            'font-size:17px',
-            'line-height:1',
-            'cursor:pointer',
-            'display:flex',
-            'align-items:center',
-            'justify-content:center',
-            'box-shadow:0 2px 10px rgba(0,0,0,0.5)',
-            'transition:background 0.15s,left 0.2s',
-        ].join(';');
-        btn.setAttribute('style', css);
-
-        btn.addEventListener('click', function () {
-            clickSidebarToggle();
-            /* Give Streamlit 300 ms to update the DOM, then refresh icon */
-            setTimeout(function () { updateBtn(btn); }, 300);
-        });
-        btn.addEventListener('mouseenter', function () {
-            btn.style.background = '#2563eb';
-        });
-        btn.addEventListener('mouseleave', function () {
-            btn.style.background = '#1d4ed8';
-        });
-
-        doc.body.appendChild(btn);
-
-        /* ── Watch ONLY the sidebar's aria-expanded attribute.
-           IMPORTANT: never use { subtree:true, attributes:true } on doc.body —
-           that fires on every React re-render and jams the JS thread. ── */
-        var sb = doc.querySelector('section[data-testid="stSidebar"]');
-        if (sb) {
-            try {
-                new MutationObserver(function () { updateBtn(btn); })
-                    .observe(sb, { attributes: true, attributeFilter: ['aria-expanded'] });
-            } catch (e) {}
-        }
-
-        /* Light periodic sync every 1.5 s as a fallback for the above observer */
-        setInterval(function () { updateBtn(btn); }, 1500);
-
-        updateBtn(btn);
-    }
-
-    /* Wait for the DOM to be ready, then inject */
-    if (doc.readyState === 'loading') {
-        doc.addEventListener('DOMContentLoaded', injectToggleBtn);
-    } else {
-        injectToggleBtn();
-    }
-    /* Retry for Streamlit's async first render (5 × 1 s = 5 s, then stops) */
-    var retries = 0;
-    var retryT = setInterval(function () {
-        injectToggleBtn();
-        if (++retries >= 5) clearInterval(retryT);
-    }, 1000);
 })();
 </script>
 """, height=0, scrolling=False)
@@ -835,7 +718,9 @@ with st.sidebar:
         st.session_state.conv_title = ""
         st.rerun()
 
-    st.divider()
+    # Thin separator — raw HTML avoids Streamlit's wrapper divs that render as boxes
+    st.markdown("<hr style='margin:8px 0;border:none;border-top:1px solid #222'>",
+                unsafe_allow_html=True)
 
     # ── Model selector ──────────────────────────────────────────────────────────
     model_options = {
@@ -848,7 +733,8 @@ with st.sidebar:
     # Reports output folder (local only — cloud uses ephemeral storage)
     output_dir = st.text_input("Reports Folder", value="reports")
 
-    st.divider()
+    st.markdown("<hr style='margin:8px 0;border:none;border-top:1px solid #222'>",
+                unsafe_allow_html=True)
 
     # ── Conversation history ────────────────────────────────────────────────────
     all_convs = _load_all_convs()
@@ -880,7 +766,8 @@ with st.sidebar:
                         st.session_state.conv_id    = _new_conv_id()
                         st.session_state.conv_title = ""
                     st.rerun()
-        st.divider()
+        st.markdown("<hr style='margin:8px 0;border:none;border-top:1px solid #222'>",
+                    unsafe_allow_html=True)
 
     # ── Quick Examples ──────────────────────────────────────────────────────────
     st.markdown("### Quick Examples")
