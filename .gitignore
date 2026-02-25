@@ -14,6 +14,9 @@ reports/
 *.xlsx
 *.pdf
 
+# ── Conversation history (private, never commit) ──────────────────────────────
+conversations/
+
 # ── Streamlit local config ────────────────────────────────────────────────────
 .streamlit/secrets.toml
 

@@ -5,10 +5,12 @@ Launch: double-click launch.bat  or  streamlit run app.py
 
 import os
 import sys
+import json
 import threading
 import queue
 import time
 from datetime import datetime
+from pathlib import Path
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -24,6 +26,51 @@ try:
             os.environ[_k] = str(_v)
 except Exception:
     pass  # Not on Streamlit Cloud, or secrets not yet configured — that's fine
+
+
+# ── Conversation persistence ────────────────────────────────────────────────────
+_CONV_DIR = Path("conversations")
+
+
+def _new_conv_id() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def _save_conv(conv_id: str, title: str, messages: list) -> None:
+    """Persist a conversation to disk as JSON. Silently no-ops if not writable."""
+    try:
+        _CONV_DIR.mkdir(exist_ok=True)
+        data = {
+            "id": conv_id,
+            "title": title or "Untitled",
+            "updated_at": datetime.now().isoformat(),
+            "messages": messages,
+        }
+        (_CONV_DIR / f"{conv_id}.json").write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass  # Read-only filesystem (some cloud environments) — silently skip
+
+
+def _load_all_convs() -> list[dict]:
+    """Return all saved conversations sorted newest-first."""
+    if not _CONV_DIR.exists():
+        return []
+    convs = []
+    for p in _CONV_DIR.glob("*.json"):
+        try:
+            convs.append(json.loads(p.read_text(encoding="utf-8")))
+        except Exception:
+            pass
+    return sorted(convs, key=lambda c: c.get("updated_at", ""), reverse=True)
+
+
+def _delete_conv(conv_id: str) -> None:
+    try:
+        (_CONV_DIR / f"{conv_id}.json").unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 # ── Live stdout capture ────────────────────────────────────────────────────────
@@ -416,12 +463,50 @@ header[data-testid="stHeader"] * { color: #ffffff !important; }
 
 /* iframe overlays that can carry white bg */
 iframe { background-color: #000 !important; }
+
+/* ═══════════════════════════════════════════════
+   SIDEBAR TOGGLE — always visible, never hidden
+═══════════════════════════════════════════════ */
+/* Collapse button (inside open sidebar) */
+[data-testid="stSidebarCollapseButton"],
+[data-testid="stSidebarCollapseButton"] button {
+    background-color: #1a1a1a !important;
+    border: 1px solid #333 !important;
+    border-radius: 6px !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    display: flex !important;
+}
+/* Expand button (the arrow shown when sidebar is collapsed) */
+[data-testid="collapsedControl"],
+[data-testid="collapsedControl"] button {
+    background-color: #1a1a1a !important;
+    border: 1px solid #444 !important;
+    border-radius: 0 6px 6px 0 !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    display: flex !important;
+}
+[data-testid="stSidebarCollapseButton"] svg,
+[data-testid="collapsedControl"] svg {
+    fill: #ffffff !important;
+    color: #ffffff !important;
+}
+[data-testid="stSidebarCollapseButton"]:hover button,
+[data-testid="collapsedControl"]:hover button {
+    background-color: #2a2a2a !important;
+    border-color: #666 !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
 # ── Session state ──────────────────────────────────────────────────────────────
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "conv_id" not in st.session_state:
+    st.session_state.conv_id = _new_conv_id()
+if "conv_title" not in st.session_state:
+    st.session_state.conv_title = ""
 
 
 # ── Lazy agent loader ──────────────────────────────────────────────────────────
@@ -435,11 +520,24 @@ def load_agents():
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## FinAgent CIO")
+
+    # ── New Chat ────────────────────────────────────────────────────────────────
+    if st.button("＋  New Chat", width="stretch", key="new_chat_btn"):
+        # Auto-save current conversation before starting fresh
+        if st.session_state.messages:
+            _save_conv(
+                st.session_state.conv_id,
+                st.session_state.conv_title,
+                st.session_state.messages,
+            )
+        st.session_state.messages = []
+        st.session_state.conv_id = _new_conv_id()
+        st.session_state.conv_title = ""
+        st.rerun()
+
     st.divider()
 
-    # Model selector — only DeepSeek options are available (same API key).
-    # To unlock GPT-4o or other providers, add the corresponding API key to
-    # st.secrets (Streamlit Cloud) or .env (local).
+    # ── Model selector ──────────────────────────────────────────────────────────
     model_options = {
         "DeepSeek Chat (fast)":        "deepseek/deepseek-chat",
         "DeepSeek Reasoner R1 (deep)": "deepseek/deepseek-reasoner",
@@ -447,10 +545,43 @@ with st.sidebar:
     chosen_label = st.selectbox("AI Model", list(model_options.keys()), index=0)
     chosen_model = model_options[chosen_label]
 
-    # Reports output folder (local only — not used on Streamlit Cloud)
+    # Reports output folder (local only — cloud uses ephemeral storage)
     output_dir = st.text_input("Reports Folder", value="reports")
 
     st.divider()
+
+    # ── Conversation history ────────────────────────────────────────────────────
+    all_convs = _load_all_convs()
+    if all_convs:
+        st.markdown("### Recent Chats")
+        for conv in all_convs[:20]:
+            c_id    = conv.get("id", "")
+            c_title = conv.get("title", "Untitled")
+            c_date  = conv.get("updated_at", "")[:10]
+            c_msgs  = conv.get("messages", [])
+            label   = c_title[:32] + ("…" if len(c_title) > 32 else "")
+
+            col_btn, col_del = st.columns([5, 1])
+            with col_btn:
+                active = c_id == st.session_state.conv_id
+                btn_label = f"**{label}**" if active else label
+                if st.button(btn_label, key=f"conv_{c_id}", width="stretch",
+                             help=f"{c_date}  ·  {len(c_msgs)//2} exchanges"):
+                    st.session_state.messages   = c_msgs
+                    st.session_state.conv_id    = c_id
+                    st.session_state.conv_title = conv.get("title", "")
+                    st.rerun()
+            with col_del:
+                if st.button("🗑", key=f"del_{c_id}", help="Delete this conversation"):
+                    _delete_conv(c_id)
+                    if c_id == st.session_state.conv_id:
+                        st.session_state.messages   = []
+                        st.session_state.conv_id    = _new_conv_id()
+                        st.session_state.conv_title = ""
+                    st.rerun()
+        st.divider()
+
+    # ── Quick Examples ──────────────────────────────────────────────────────────
     st.markdown("### Quick Examples")
     examples = [
         "Analyze Tesla TSLA",
@@ -464,11 +595,6 @@ with st.sidebar:
     for ex in examples:
         if st.button(ex, key=f"ex_{ex}", width="stretch"):
             st.session_state["prefill_query"] = ex
-
-    st.divider()
-    if st.button("Clear Conversation", width="stretch"):
-        st.session_state.messages = []
-        st.rerun()
 
 
 # ── Apply config ───────────────────────────────────────────────────────────────
@@ -595,6 +721,19 @@ if prompt:
             response_text = "Error: timed out."
 
     st.session_state.messages.append({"role": "assistant", "content": response_text})
+
+    # Auto-save conversation after every exchange
+    if not st.session_state.conv_title and st.session_state.messages:
+        # Use the first user message (truncated) as the conversation title
+        first_user = next(
+            (m["content"] for m in st.session_state.messages if m["role"] == "user"), ""
+        )
+        st.session_state.conv_title = first_user[:60]
+    _save_conv(
+        st.session_state.conv_id,
+        st.session_state.conv_title,
+        st.session_state.messages,
+    )
 
     # Show download buttons only if report files were just created
     if os.path.isdir(output_dir):
