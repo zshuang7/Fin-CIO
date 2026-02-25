@@ -82,6 +82,12 @@ class TavilyEngine(BaseTool):
                 budget = _TAVILY_MAX - len(_PREFIX)
                 return _PREFIX + (text if len(text) <= budget else text[:budget - 3] + "...")
 
+            # ── Step 0: Pre-detect numeric exchange tickers BEFORE Tavily ─
+            # e.g. "2015 HK" = 2015.HK (Li Auto HKEX), not "HK market in 2015"
+            #      "1211 HK" = 1211.HK (BYD), "8306 T" = 8306.T (Mitsubishi UFJ)
+            # This MUST run before Tavily and before any year/market heuristics.
+            pre_numeric_tickers = _extract_numeric_tickers(user_input)
+
             # Attempt 1 – full query
             search_q = _build_query(user_input)
 
@@ -110,22 +116,36 @@ class TavilyEngine(BaseTool):
             results = resp.get("results") or []
 
             # ── Classify query type from content ──────────────────────
-            lower = user_input.lower()
             combined_text = user_input + " " + answer + " " + " ".join(
                 (r.get("title") or "") + " " + (r.get("content") or "")[:200]
                 for r in results[:3]
             )
 
-            query_type = _classify_intent(user_input, combined_text)
-            tickers    = _extract_tickers(combined_text)
-            time_period = _extract_time_period(user_input, combined_text)
-            market      = _extract_market(user_input, combined_text)
+            query_type  = _classify_intent(user_input, combined_text, pre_numeric_tickers)
+            tickers     = _extract_tickers(combined_text, pre_numeric_tickers)
+            time_period = _extract_time_period(user_input, combined_text, pre_numeric_tickers)
+            market      = _extract_market(user_input, combined_text, pre_numeric_tickers)
 
             # ── Format the structured understanding ───────────────────
+            # Prepend a disambiguation banner when numeric tickers were detected.
+            # This prevents the CIO from treating "2015 HK" as "year 2015" etc.
+            ticker_alert = []
+            if pre_numeric_tickers:
+                ticker_alert = [
+                    "  ⚠  TICKER DISAMBIGUATION:",
+                    f"     Numeric exchange codes detected: {', '.join(pre_numeric_tickers)}",
+                    "     These are STOCK TICKERS, not years or market names.",
+                    "     e.g. '2015 HK' → 2015.HK (Li Auto, HKEX)",
+                    "          '1211 HK' → 1211.HK (BYD, HKEX)",
+                    "          '8306 T'  → 8306.T  (Mitsubishi UFJ, TSE)",
+                    "",
+                ]
+
             lines = [
                 "═" * 58,
                 "  QUERY UNDERSTANDING (Tavily AI Search)",
                 "═" * 58,
+                *ticker_alert,
                 f"  Raw Input    : {user_input}",
                 f"  Query Type   : {query_type}",
                 f"  Tickers Found: {', '.join(tickers) if tickers else 'N/A'}",
@@ -399,56 +419,137 @@ def _format_results(query: str, resp: dict, is_news: bool = False) -> str:
     return "\n".join(lines)
 
 
-def _classify_intent(raw: str, context: str) -> str:
-    """Rule-based intent classification from query text + search context."""
+def _extract_numeric_tickers(raw: str) -> list[str]:
+    """
+    Detect Asian and London market numeric tickers BEFORE any year/market
+    heuristics fire.  This prevents false positives like "2015 HK" being
+    read as "the HK market in year 2015".
+
+    Supported formats:
+      • Explicit dotted  : 2015.HK, 8306.T, HSBA.L, 1211.HK
+      • HKEX spaced      : 2015 HK, 1211 HK, 0700 HK
+      • TSE/Japan spaced : 8306 T, 7203 T, 6758 JP
+      • Shanghai/Shenzhen: 600519 SS, 000858 SZ
+      • Korean Exchange  : 005930 KS
+      • Taiwan Exchange  : 2330 TW
+    """
+    import re
+    found: list[str] = []
+
+    # Format 1: explicit dotted (highest confidence)
+    dotted = re.findall(
+        r'\b(\d{1,6})\.(HK|T|L|SS|SZ|KS|TW|PA|DE|AS|BR|AX|NS|BO)\b',
+        raw, re.I,
+    )
+    for num, exch in dotted:
+        t = f"{num}.{exch.upper()}"
+        if t not in found:
+            found.append(t)
+
+    # Format 2: "NNNN HK" — most common ambiguity (HKEX, 4–5 digits + space + HK)
+    # Requires a word boundary before the number and after HK to avoid matching
+    # substrings like "in 2015 HKD" (HKD would be matched by HK if we're not careful)
+    hk_spaced = re.findall(r'(?<!\w)(\d{1,5})\s+HK(?!\w)', raw, re.I)
+    for num in hk_spaced:
+        t = f"{num}.HK"
+        if t not in found:
+            found.append(t)
+
+    # Format 3: "NNNN T" or "NNNN JP" — Tokyo/Japan (4–5 digits)
+    jp_spaced = re.findall(r'(?<!\w)(\d{4,5})\s+(?:T|JP)(?!\w)', raw, re.I)
+    for num in jp_spaced:
+        t = f"{num}.T"
+        if t not in found:
+            found.append(t)
+
+    # Format 4: Other common spaced exchange patterns
+    other_patterns = [
+        (r'(?<!\w)(\d{1,6})\s+SS(?!\w)', "SS"),   # Shanghai
+        (r'(?<!\w)(\d{1,6})\s+SZ(?!\w)', "SZ"),   # Shenzhen
+        (r'(?<!\w)(\d{6})\s+KS(?!\w)',   "KS"),   # Korea
+        (r'(?<!\w)(\d{4})\s+TW(?!\w)',   "TW"),   # Taiwan
+    ]
+    for pattern, exch in other_patterns:
+        for num in re.findall(pattern, raw, re.I):
+            t = f"{num}.{exch}"
+            if t not in found:
+                found.append(t)
+
+    return found
+
+
+def _classify_intent(raw: str, context: str,
+                     pre_numeric: list[str] | None = None) -> str:
+    """
+    Rule-based intent classification from query text + search context.
+
+    IMPORTANT: numeric exchange tickers (pre_numeric) are checked FIRST so
+    that '2015 HK' is never mis-classified as HISTORICAL_ANALYSIS just
+    because '2015' is a year-like number.
+    """
     r = raw.lower()
-    c = context.lower()
 
-    # Historical period keywords
-    hist_years = [str(y) for y in range(2000, 2024)]
-    if any(yr in r for yr in hist_years):
-        return "HISTORICAL_ANALYSIS"
+    # ── Priority 0: numeric tickers win over year detection ────────────
+    if pre_numeric:
+        # If comparison keywords also present → COMPARISON
+        if any(w in r for w in ["vs", "versus", "compare", "比较", "对比", "差距",
+                                 "with", "和", "与"]):
+            return "COMPARISON"
+        return "STOCK_ANALYSIS"
 
-    # Comparison keywords
+    # ── Historical period keywords ──────────────────────────────────────
+    # Only check AFTER confirming there are no numeric tickers.
+    import re as _re
+    hist_match = _re.search(r'\b(19\d{2}|20(?:0[0-9]|1[0-9]|2[0-3]))\b', raw)
+    if hist_match:
+        # Double-check: is that number immediately followed by an exchange suffix?
+        after = raw[hist_match.end():hist_match.end() + 5].strip().upper()
+        if not (after.startswith("HK") or after.startswith(".HK") or
+                after.startswith("T") or after.startswith(".T")):
+            return "HISTORICAL_ANALYSIS"
+
+    # ── Comparison keywords ─────────────────────────────────────────────
     if any(w in r for w in ["vs", "versus", "compare", "比较", "对比", "差距"]):
         return "COMPARISON"
 
-    # Concept / educational
+    # ── Concept / educational ───────────────────────────────────────────
     concept_kw = ["what is", "explain", "how does", "define", "什么是", "如何",
                   "why", "when", "dcf", "p/e", "eps", "wacc", "roi", "capm"]
     if any(w in r for w in concept_kw):
         return "CONCEPT_EXPLANATION"
 
-    # Macro / market / index
+    # ── Macro / market / index ──────────────────────────────────────────
     macro_kw = ["market", "index", "economy", "gdp", "inflation", "rate", "fed",
                 "hsi", "s&p", "nasdaq", "dow", "nikkei", "ftse", "sector",
                 "港股", "美股", "a股", "大盘", "行业", "板块", "宏观", "利率"]
     if any(w in r for w in macro_kw):
-        # Also check if a specific ticker is mentioned
-        tickers = _extract_tickers(raw)
-        if not tickers:
+        if not _extract_tickers(raw):
             return "MARKET_ANALYSIS"
 
-    # Crypto
+    # ── Crypto ──────────────────────────────────────────────────────────
     crypto_kw = ["bitcoin", "btc", "eth", "ethereum", "crypto", "defi", "web3",
                  "加密", "比特币", "以太坊"]
     if any(w in r for w in crypto_kw):
         return "CRYPTO_ANALYSIS"
 
-    # IPO
+    # ── IPO ─────────────────────────────────────────────────────────────
     if any(w in r for w in ["ipo", "上市", "新股"]):
         return "IPO_ANALYSIS"
 
-    # Default: stock-level analysis
     return "STOCK_ANALYSIS"
 
 
-def _extract_tickers(text: str) -> list[str]:
-    """Extract likely stock ticker symbols from text."""
+def _extract_tickers(text: str,
+                     pre_numeric: list[str] | None = None) -> list[str]:
+    """
+    Extract likely stock ticker symbols from text.
+    pre_numeric (from _extract_numeric_tickers) is merged in with highest priority
+    so that numeric HKEX / TSE codes are always present regardless of letter case.
+    """
     import re
-    # Common explicit tickers (uppercase 1-5 letters, standalone)
-    explicit = re.findall(r'\b([A-Z]{1,5})\b', text)
-    # Known name→ticker map for common queries
+    found: list[str] = list(pre_numeric) if pre_numeric else []
+
+    # Known name→ticker map
     name_map = {
         "tesla": "TSLA", "apple": "AAPL", "nvidia": "NVDA",
         "microsoft": "MSFT", "google": "GOOGL", "alphabet": "GOOGL",
@@ -459,39 +560,62 @@ def _extract_tickers(text: str) -> list[str]:
         "tencent": "0700.HK", "腾讯": "0700.HK",
         "alibaba": "BABA", "阿里": "BABA", "阿里巴巴": "BABA",
         "meituan": "3690.HK", "美团": "3690.HK",
+        "byd": "1211.HK", "比亚迪": "1211.HK",
+        "li auto": "2015.HK", "理想汽车": "2015.HK",
+        "xpeng": "9868.HK", "小鹏": "9868.HK",
+        "nio": "9866.HK", "蔚来": "9866.HK",
+        "ping an": "2318.HK", "平安": "2318.HK",
     }
-    found = []
     lower = text.lower()
     for name, ticker in name_map.items():
         if name in lower and ticker not in found:
             found.append(ticker)
 
-    # Filter explicit tickers (exclude common English words)
+    # Common explicit uppercase tickers (1-5 letters, standalone word)
+    explicit = re.findall(r'\b([A-Z]{1,5})\b', text)
     stop = {"THE", "AND", "FOR", "ARE", "BUT", "NOT", "YOU", "ALL",
             "CAN", "HER", "WAS", "ONE", "OUR", "OUT", "DAY", "GET",
             "HAS", "HIM", "HIS", "HOW", "ITS", "MAY", "NEW", "NOW",
             "OLD", "SEE", "TWO", "WAY", "WHO", "BOY", "DID", "ITS",
             "LET", "PUT", "SAY", "SHE", "TOO", "USE", "ETF", "CEO",
             "IPO", "GDP", "FED", "USD", "HKD", "CNY", "EUR", "AI",
-            "USA", "HK", "US", "UK", "CN", "PE", "PB", "EV"}
+            "USA", "HK", "US", "UK", "CN", "PE", "PB", "EV", "TTM",
+            "YOY", "QOQ", "FCF", "EPS", "DCF"}
     for t in explicit:
         if t not in stop and len(t) >= 2 and t not in found:
             found.append(t)
-    return found[:5]
+
+    return found[:6]
 
 
-def _extract_time_period(raw: str, context: str) -> str:
-    """Extract mentioned time period from query."""
+def _extract_time_period(raw: str, context: str,
+                         pre_numeric: list[str] | None = None) -> str:
+    """
+    Extract mentioned time period from query.
+    When numeric tickers are present, year-like numbers (e.g. 2015 in '2015 HK')
+    are excluded from the time period result to avoid false positives.
+    """
     import re
-    # Explicit years
+
+    # Collect the numeric parts of known tickers so we can exclude them
+    ticker_numbers: set[str] = set()
+    if pre_numeric:
+        for t in pre_numeric:
+            m = re.match(r'^(\d+)', t)
+            if m:
+                ticker_numbers.add(m.group(1))
+
     years = re.findall(r'\b(19\d{2}|20\d{2})\b', raw)
+    # Filter out years that are actually ticker codes
+    years = [y for y in years if y not in ticker_numbers]
+
     if years:
-        return f"{min(years)}–{max(years)}" if len(set(years)) > 1 else years[0]
-    # Quarter patterns
+        return f"{min(years)}\u2013{max(years)}" if len(set(years)) > 1 else years[0]
+
     quarters = re.findall(r'\b(Q[1-4]\s*\d{4}|\d{4}\s*Q[1-4])\b', raw, re.I)
     if quarters:
         return quarters[0]
-    # Relative terms
+
     if any(w in raw.lower() for w in ["this year", "今年"]):
         from datetime import datetime
         return str(datetime.now().year)
@@ -501,11 +625,26 @@ def _extract_time_period(raw: str, context: str) -> str:
     return ""
 
 
-def _extract_market(raw: str, context: str) -> str:
-    """Extract the market or index being discussed."""
+def _extract_market(raw: str, context: str,
+                    pre_numeric: list[str] | None = None) -> str:
+    """
+    Extract the market or index being discussed.
+    When numeric HK tickers are detected, 'HK' in the query is treated as
+    an exchange suffix (e.g. 2015.HK), NOT as 'Hong Kong market'.
+    """
     r = raw.lower()
-    if any(w in r for w in ["hk", "hong kong", "港股", "恒指", "hang seng", "hsi"]):
-        return "Hong Kong / Hang Seng Index (HSI)"
+
+    # If the only 'hk' present is as an exchange suffix for numeric tickers,
+    # don't claim the whole query is about the HK market index.
+    hk_is_exchange_only = bool(pre_numeric) and all(
+        t.endswith(".HK") for t in (pre_numeric or [])
+    ) and "hong kong" not in r and "hang seng" not in r and "hsi" not in r
+
+    if not hk_is_exchange_only:
+        if any(w in r for w in ["hk market", "hong kong", "港股", "恒指",
+                                 "hang seng", "hsi", "hk stock market"]):
+            return "Hong Kong / Hang Seng Index (HSI)"
+
     if any(w in r for w in ["s&p", "sp500", "us market", "us stock", "美股"]):
         return "US Market / S&P 500"
     if any(w in r for w in ["nasdaq", "tech", "科技股"]):
