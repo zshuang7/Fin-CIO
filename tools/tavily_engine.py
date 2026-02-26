@@ -478,10 +478,21 @@ def _try_local_understand(raw: str, pre_numeric: list[str]) -> str | None:
             + "  These are STOCK TICKERS, NOT year references."
         )
         approach = (
-            [f"COMPARISON: run STOCK_ANALYSIS for each of: {', '.join(tickers[:4])}"]
+            [
+                f"COMPARISON: for each ticker {', '.join(tickers[:4])}",
+                "MANDATORY: call CompanyAgent(ticker) FIRST for EACH ticker",
+                "  → yfinance resolves actual company name — do NOT guess",
+                "Then NewsAgent per ticker → CIO side-by-side synthesis",
+            ]
             if q_type == "COMPARISON"
-            else [f"STOCK_ANALYSIS for {tickers[0] if tickers else 'ticker'}",
-                  "CompanyAgent + NewsAgent → CIO synthesis"]
+            else [
+                f"STOCK_ANALYSIS for {tickers[0] if tickers else 'ticker'}",
+                "MANDATORY FIRST STEP: call CompanyAgent(ticker)",
+                "  → yfinance will return the REAL company name and price",
+                "  → do NOT infer company from numeric code using training data",
+                "  → training data is often wrong for HKEX/TSE 4-digit codes",
+                "Then NewsAgent (optional) → CIO snapshot synthesis",
+            ]
         )
         return _local_understanding(raw, q_type, tickers, time_period, note, approach)
 
@@ -703,10 +714,23 @@ def _extract_tickers(text: str,
         "alibaba": "BABA", "阿里": "BABA", "阿里巴巴": "BABA",
         "meituan": "3690.HK", "美团": "3690.HK",
         "byd": "1211.HK", "比亚迪": "1211.HK",
-        "li auto": "2015.HK", "理想汽车": "2015.HK",
-        "xpeng": "9868.HK", "小鹏": "9868.HK",
+        "li auto": "2015.HK", "理想汽车": "2015.HK", "理想": "2015.HK",
+        "xpeng": "9868.HK", "小鹏": "9868.HK", "小鹏汽车": "9868.HK",
         "nio": "9866.HK", "蔚来": "9866.HK",
-        "ping an": "2318.HK", "平安": "2318.HK",
+        "ping an": "2318.HK", "平安": "2318.HK", "平安保险": "2318.HK",
+        "geely": "0175.HK", "吉利": "0175.HK", "吉利汽车": "0175.HK",
+        "china mobile": "0941.HK", "中国移动": "0941.HK",
+        "hsbc": "0005.HK",
+        "hkex": "0388.HK", "港交所": "0388.HK",
+        "netease": "9999.HK", "网易": "9999.HK",
+        "kuaishou": "1024.HK", "快手": "1024.HK",
+        "cnooc": "0883.HK", "中海油": "0883.HK",
+        "petrochina": "0857.HK", "中石油": "0857.HK",
+        "toyota": "7203.T", "丰田": "7203.T",
+        "sony": "6758.T", "索尼": "6758.T",
+        "softbank": "9984.T", "软银": "9984.T",
+        "keyence": "6861.T",
+        "samsung": "005930.KS", "三星": "005930.KS",
     }
     lower = text.lower()
     for name, ticker in name_map.items():

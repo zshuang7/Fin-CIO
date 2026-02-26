@@ -226,28 +226,53 @@ def _parse_log(raw: str, seen_agents: set) -> str | None:
     return None
 
 # ── Pre-flight depth hint ──────────────────────────────────────────────────────
+import re as _re
+
+# Numeric exchange ticker patterns — e.g. "3690 HK", "8306 T", "2015.HK"
+# These must NEVER be answered from the CIO's training-data knowledge alone
+# because the CIO can misidentify companies (e.g. 3690.HK is Meituan, not Geely).
+_NUMERIC_TICKER_RE = _re.compile(
+    r'(?<!\w)\d{1,6}(?:\s+|\.)(?:HK|T|L|SS|SZ|KS|TW|JP|NS|BO)(?!\w)',
+    _re.IGNORECASE,
+)
+
+
+def _has_numeric_ticker(text: str) -> bool:
+    return bool(_NUMERIC_TICKER_RE.search(text))
+
+
 def _detect_depth_hint(text: str) -> int:
     """
     Fast client-side depth heuristic (runs in microseconds, no API call).
     Returns 1 or 2 to tell the CIO it can skip sub-agents, or 0 meaning
     'let the CIO decide via its own depth-level assessment'.
+
+    CRITICAL RULE: queries containing numeric exchange tickers (e.g. '3690 HK',
+    '8306 T') must never be Level 1.  The CIO's training data frequently
+    misidentifies Asian numeric codes — CompanyAgent must resolve them.
     """
     t = text.lower().strip()
     words = t.split()
     wc = len(words)
 
-    # Explicit fast-path keywords override everything
+    # ── Guard: numeric tickers always need at least CompanyAgent ──────────
+    # "hows 3690 HK" has 3 words but 3690.HK=Meituan, not Geely.
+    # Without CompanyAgent the CIO guesses wrong. Minimum Level 2.
+    if _has_numeric_ticker(text):
+        return 2
+
+    # Explicit fast-path keywords override word-count rules
     if any(w in t for w in ["quick", "brief", "tldr", "tl;dr", "just tell",
                               "one sentence", "一句话", "简单说", "简短"]):
         return 1
 
-    # Pure concept question (≤ 10 words)
+    # Pure concept question (≤ 10 words, no ticker context)
     concept_starts = ("what is", "what are", "what's a", "explain ", "define ",
                       "how does", "how do ", "what does", "什么是", "如何理解")
     if wc <= 10 and any(t.startswith(s) or s in t for s in concept_starts):
         return 1
 
-    # Very short query → Level 1 regardless of content
+    # Very short query → Level 1 (no ticker = safe to use knowledge)
     if wc <= 4:
         return 1
 
@@ -996,9 +1021,27 @@ if prompt:
     # Pre-flight depth hint — injected as first line so the CIO reads it before
     # anything else, preventing unnecessary sub-agent calls for simple queries.
     depth_hint = _detect_depth_hint(prompt)
-    _HINT_LABELS = {
-        1: "[FAST-PATH Level 1: answer INSTANTLY from knowledge. ZERO tool calls. ≤100 words.]",
-        2: "[FAST-PATH Level 2: skip QueryAnalyst. AT MOST 1 sub-agent call. ≤250 words.]",
+    _numeric = _has_numeric_ticker(prompt)
+    _HINT_LABELS: dict[int, str] = {
+        1: (
+            "[FAST-PATH Level 1: answer INSTANTLY from knowledge. "
+            "ZERO tool calls. ≤100 words.]"
+        ),
+        2: (
+            # Numeric ticker variant — must call CompanyAgent to resolve company name
+            "[FAST-PATH Level 2 — NUMERIC TICKER: "
+            "Skip QueryAnalyst BUT MUST call CompanyAgent(ticker) FIRST. "
+            "NEVER guess company name from training data — "
+            "Asian numeric codes are frequently mis-identified "
+            "(e.g. 3690.HK=Meituan NOT Geely; 0175.HK=Geely; "
+            "1211.HK=BYD; 2015.HK=Li Auto; 0700.HK=Tencent; "
+            "9988.HK=Alibaba; 9866.HK=NIO; 9868.HK=XPeng; "
+            "0941.HK=China Mobile; 0005.HK=HSBC). "
+            "≤250 words.]"
+            if _numeric else
+            "[FAST-PATH Level 2: skip QueryAnalyst. "
+            "AT MOST 1 sub-agent call. ≤250 words.]"
+        ),
     }
     hint_prefix = _HINT_LABELS.get(depth_hint, "")
 
