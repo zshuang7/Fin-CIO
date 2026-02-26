@@ -261,6 +261,68 @@ def _escape_currency(text: str) -> str:
     return result
 
 
+def _extract_vote_pcts(text: str) -> tuple[float, float, float] | None:
+    """
+    Extract (bullish, neutral, bearish) percentages from the consensus module line.
+    Expected format:
+      🟢 Bullish: 60% | 🟡 Neutral: 30% | 🔴 Bearish: 10%
+    """
+    if not text:
+        return None
+    m = _re.search(
+        r"🟢\s*Bullish:\s*([0-9]+(?:\.[0-9]+)?)%\s*\|\s*🟡\s*Neutral:\s*([0-9]+(?:\.[0-9]+)?)%\s*\|\s*🔴\s*Bearish:\s*([0-9]+(?:\.[0-9]+)?)%",
+        text,
+    )
+    if not m:
+        return None
+    try:
+        b, n, r = float(m.group(1)), float(m.group(2)), float(m.group(3))
+        # sanity clamp
+        b = max(0.0, min(100.0, b))
+        n = max(0.0, min(100.0, n))
+        r = max(0.0, min(100.0, r))
+        return b, n, r
+    except Exception:
+        return None
+
+
+def _vote_svg(bullish: float, neutral: float, bearish: float) -> str:
+    """
+    Render an inline SVG vote bar chart (Streamlit-friendly) similar to the screenshot.
+    Uses dark theme + white text.
+    """
+    # layout
+    w = 520
+    h = 120
+    x0 = 110
+    bar_w = 360
+    bar_h = 14
+    gap = 18
+
+    def bw(p: float) -> int:
+        return int(round(bar_w * (p / 100.0)))
+
+    rows = [
+        ("🐂", "Bullish", bullish, "#22c55e"),
+        ("😐", "Neutral", neutral, "#f59e0b"),
+        ("🐻", "Bearish", bearish, "#ef4444"),
+    ]
+    parts = [
+        f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Wall Street vote tally">',
+        '<rect x="0" y="0" width="100%" height="100%" fill="rgba(0,0,0,0)"/>',
+        '<text x="0" y="18" fill="#e5e7eb" font-size="14" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto">Vote Tally</text>',
+    ]
+    y = 34
+    for icon, label, pct, color in rows:
+        parts.append(f'<text x="0" y="{y+12}" fill="#e5e7eb" font-size="13" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto">{icon} {label}</text>')
+        parts.append(f'<rect x="{x0}" y="{y}" width="{bar_w}" height="{bar_h}" rx="6" fill="#111827" />')
+        parts.append(f'<rect x="{x0}" y="{y}" width="{bw(pct)}" height="{bar_h}" rx="6" fill="{color}" />')
+        parts.append(f'<text x="{x0+bar_w+10}" y="{y+12}" fill="#e5e7eb" font-size="13" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto">{pct:.1f}%</text>')
+        y += gap
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
 def _clean_cio_output(text: str) -> str:
     """
     Remove any residual system-thinking lines or verbose QueryAnalyst reports
@@ -1348,6 +1410,10 @@ if prompt:
             if status == "ok":
                 response_text = content
                 st.markdown(_escape_currency(response_text))
+                vote = _extract_vote_pcts(response_text)
+                if vote:
+                    b, n, r = vote
+                    st.markdown(_vote_svg(b, n, r), unsafe_allow_html=True)
             else:
                 st.error(f"**Error:** {content}")
                 response_text = f"Error: {content}"

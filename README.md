@@ -44,6 +44,8 @@ The `.env` file is pre-configured. You can edit it to swap models:
 DEEPSEEK_API_KEY=your_key_here
 MODEL_ID=deepseek/deepseek-chat          # or deepseek/deepseek-reasoner, openai/gpt-4o
 FMP_API_KEY=your_fmp_key_here            # Financial Modeling Prep (analyst consensus vote)
+POLYGON_API_KEY=your_polygon_key_here    # Polygon.io (high-quality ticker news)
+NEWSDATA_API_KEY=your_newsdata_key_here  # NewsData.io (global media news)
 ```
 
 ### 3. Run

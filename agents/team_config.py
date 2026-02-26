@@ -43,6 +43,8 @@ from tools.news_engine import NewsEngine
 from tools.report_engine import ReportEngine
 from tools.eodhd_engine import EODHDEngine
 from tools.fmp_engine import FmpEngine
+from tools.polygon_engine import PolygonEngine
+from tools.newsdata_engine import NewsDataEngine
 
 load_dotenv()
 
@@ -167,21 +169,24 @@ news_agent = Agent(
     name="NewsAgent",
     role="Market Intelligence & Sentiment Analyst",
     model=_chat_model(),
-    tools=[TavilyEngine(), FinnhubEngine(), AlphaVantageEngine(), NewsEngine()],
+    tools=[PolygonEngine(), NewsDataEngine(), TavilyEngine(), FinnhubEngine(), AlphaVantageEngine(), NewsEngine()],
     instructions=[
-        "You are a market intelligence and news analyst. Be CONCISE — 150-200 words max.",
+        "You are a CIO-grade media analyst. Be CONCISE — 170-240 words max.",
         "",
-        "Call EXACTLY 1 primary tool (2 if the first returns no results):",
-        "  US ticker:       get_company_news(ticker)  — Finnhub, most reliable",
-        "  Non-US ticker:   news_search('<company name> stock news latest 2026')",
-        "  Historical:      web_search('<company or market> <year> key events')",
-        "  If no results:   get_stock_news(ticker)  — DuckDuckGo fallback",
+        "Call 1-2 tools max (prefer structured sources):",
+        "  Primary (US ticker):    get_media_news(ticker)        — Polygon news (publisher + date)",
+        "  Primary (any ticker):   get_latest_news('<ticker> stock') — NewsData.io global news",
+        "  Fallback (if sparse):   news_search('<ticker> earnings OR guidance OR lawsuit OR partnership 2026')",
+        "  Last resort:            get_company_news(ticker) (Finnhub, US only) OR get_stock_news(ticker) (DDG)",
+        "",
+        "CRITICAL: Focus on Tier-1 media if present: WSJ, Bloomberg, Reuters, CNBC, Yahoo Finance.",
+        "De-duplicate overlapping headlines (keep the most reputable source).",
         "",
         "Output format (strict):",
-        "  ## News & Sentiment",
-        "  Top 3-5 headlines — format: [Date] Source — Headline",
-        "  Sentiment verdict: Positive / Neutral / Negative",
-        "  Rationale: [1 sentence explaining the verdict]",
+        "  ## 📰 Latest Media News Analysis",
+        "  Top headlines (3-6) — format: [Date] Source — Headline",
+        "  Narrative (2 bullets): what changed + why it matters",
+        "  Sentiment verdict: Positive / Neutral / Negative | Confidence: High/Med/Low",
     ],
     markdown=True,
 )
@@ -272,6 +277,9 @@ cio_team = Team(
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "FINAL OUTPUT DISCIPLINE — READ THIS FIRST:",
         "  Your response is the ONLY thing the user sees. Make it clean.",
+        "  Your structure can be flexible, but TWO modules are mandatory for any stock/symbol:",
+        "    1) 🏛️ Institutional & Expert Consensus (vote + dated snippets)",
+        "    2) 📰 Latest Media News Analysis (Tier-1 media focus)",
         "  STRICTLY FORBIDDEN in your output:",
         "    ✗ QueryAnalyst's classification notes",
         "    ✗ Any 'Query Analysis Report' or sub-section numbered lists",
@@ -447,7 +455,7 @@ cio_team = Team(
         "       Do NOT replace this with your own generic knowledge. Use evidence.",
         "",
         "    ## 🌐 Macro & Sector  (3 bullets max)",
-        "    ## 📰 News & Sentiment  (2-3 headlines + verdict)",
+        "    ## 📰 Latest Media News Analysis  (3-6 headlines + 2 bullets narrative + verdict)",
         "    ## 🎯 Recommendation",
         "       **BUY / HOLD / SELL** | Conviction: High/Med/Low",
         "       Target: XXX | Horizon: XX months",
