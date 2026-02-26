@@ -40,6 +40,7 @@ class PolygonEngine(BaseTool):
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
         self.register(self.get_media_news)
+        self.register(self.get_tier1_media_news)
 
     def _cache_path(self, key: str) -> Path:
         safe = key.replace("/", "_").replace("?", "_").replace("&", "_").replace(".", "_")
@@ -91,6 +92,16 @@ class PolygonEngine(BaseTool):
         if not publisher:
             return "Unknown"
         return publisher.get("name") or publisher.get("homepage_url") or "Unknown"
+
+    @staticmethod
+    def _is_tier1(source: str, url: str) -> bool:
+        s = (source or "").lower()
+        u = (url or "").lower()
+        tier1 = (
+            "reuters", "bloomberg", "wall street journal", "wsj",
+            "cnbc", "yahoo", "financial times", "ft.com",
+        )
+        return any(t in s for t in tier1) or any(t in u for t in ("reuters.com", "bloomberg.com", "wsj.com", "cnbc.com", "finance.yahoo.com", "ft.com"))
 
     def get_media_news(self, ticker: str, limit: int = 10, days: int = 30) -> str:
         """
@@ -149,4 +160,25 @@ class PolygonEngine(BaseTool):
             "items": items,
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    def get_tier1_media_news(self, ticker: str, limit: int = 8, days: int = 30) -> str:
+        """
+        Same as get_media_news but filters to Tier-1 outlets when possible.
+        Returns JSON. If no Tier-1 items found, returns best-effort unfiltered list with a warning.
+        """
+        raw = self.get_media_news(ticker, limit=max(int(limit), 10), days=days)
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return raw
+        items = data.get("items") or []
+        tier1_items = [i for i in items if self._is_tier1(i.get("source", ""), i.get("url", ""))]
+        if tier1_items:
+            data["items"] = tier1_items[: int(limit)]
+            data["tier1_only"] = True
+            return json.dumps(data, ensure_ascii=False, indent=2)
+        data["tier1_only"] = False
+        data["warning"] = "No Tier-1 sources found in Polygon results for this query window."
+        data["items"] = items[: int(limit)]
+        return json.dumps(data, ensure_ascii=False, indent=2)
 

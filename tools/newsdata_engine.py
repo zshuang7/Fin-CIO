@@ -39,6 +39,7 @@ class NewsDataEngine(BaseTool):
         self.api_key = os.getenv("NEWSDATA_API_KEY", "").strip()
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
         self.register(self.get_latest_news)
+        self.register(self.get_tier1_latest_news)
 
     def _cache_path(self, key: str) -> Path:
         safe = key.replace("/", "_").replace("?", "_").replace("&", "_").replace(".", "_")
@@ -142,4 +143,32 @@ class NewsDataEngine(BaseTool):
             "items": items,
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def _is_tier1(source: str, url: str) -> bool:
+        s = (source or "").lower()
+        u = (url or "").lower()
+        tier1 = ("reuters", "bloomberg", "wsj", "wallstreetjournal", "cnbc", "yahoo", "ft", "financialtimes")
+        return any(t in s for t in tier1) or any(t in u for t in ("reuters.com", "bloomberg.com", "wsj.com", "cnbc.com", "finance.yahoo.com", "ft.com"))
+
+    def get_tier1_latest_news(self, query: str, size: int = 8, days: int = 30) -> str:
+        """
+        Same as get_latest_news but filters to Tier-1 outlets when possible.
+        If none found, returns best-effort list with a warning.
+        """
+        raw = self.get_latest_news(query, size=max(int(size), 10), days=days)
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return raw
+        items = data.get("items") or []
+        tier1_items = [i for i in items if self._is_tier1(i.get("source", ""), i.get("url", ""))]
+        if tier1_items:
+            data["items"] = tier1_items[: int(size)]
+            data["tier1_only"] = True
+            return json.dumps(data, ensure_ascii=False, indent=2)
+        data["tier1_only"] = False
+        data["warning"] = "No Tier-1 sources found in NewsData.io results for this query window."
+        data["items"] = items[: int(size)]
+        return json.dumps(data, ensure_ascii=False, indent=2)
 

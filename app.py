@@ -261,66 +261,10 @@ def _escape_currency(text: str) -> str:
     return result
 
 
-def _extract_vote_pcts(text: str) -> tuple[float, float, float] | None:
-    """
-    Extract (bullish, neutral, bearish) percentages from the consensus module line.
-    Expected format:
-      🟢 Bullish: 60% | 🟡 Neutral: 30% | 🔴 Bearish: 10%
-    """
-    if not text:
-        return None
-    m = _re.search(
-        r"🟢\s*Bullish:\s*([0-9]+(?:\.[0-9]+)?)%\s*\|\s*🟡\s*Neutral:\s*([0-9]+(?:\.[0-9]+)?)%\s*\|\s*🔴\s*Bearish:\s*([0-9]+(?:\.[0-9]+)?)%",
-        text,
-    )
-    if not m:
-        return None
-    try:
-        b, n, r = float(m.group(1)), float(m.group(2)), float(m.group(3))
-        # sanity clamp
-        b = max(0.0, min(100.0, b))
-        n = max(0.0, min(100.0, n))
-        r = max(0.0, min(100.0, r))
-        return b, n, r
-    except Exception:
-        return None
-
-
-def _vote_svg(bullish: float, neutral: float, bearish: float) -> str:
-    """
-    Render an inline SVG vote bar chart (Streamlit-friendly) similar to the screenshot.
-    Uses dark theme + white text.
-    """
-    # layout
-    w = 520
-    h = 120
-    x0 = 110
-    bar_w = 360
-    bar_h = 14
-    gap = 18
-
-    def bw(p: float) -> int:
-        return int(round(bar_w * (p / 100.0)))
-
-    rows = [
-        ("🐂", "Bullish", bullish, "#22c55e"),
-        ("😐", "Neutral", neutral, "#f59e0b"),
-        ("🐻", "Bearish", bearish, "#ef4444"),
-    ]
-    parts = [
-        f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Wall Street vote tally">',
-        '<rect x="0" y="0" width="100%" height="100%" fill="rgba(0,0,0,0)"/>',
-        '<text x="0" y="18" fill="#e5e7eb" font-size="14" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto">Vote Tally</text>',
-    ]
-    y = 34
-    for icon, label, pct, color in rows:
-        parts.append(f'<text x="0" y="{y+12}" fill="#e5e7eb" font-size="13" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto">{icon} {label}</text>')
-        parts.append(f'<rect x="{x0}" y="{y}" width="{bar_w}" height="{bar_h}" rx="6" fill="#111827" />')
-        parts.append(f'<rect x="{x0}" y="{y}" width="{bw(pct)}" height="{bar_h}" rx="6" fill="{color}" />')
-        parts.append(f'<text x="{x0+bar_w+10}" y="{y+12}" fill="#e5e7eb" font-size="13" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto">{pct:.1f}%</text>')
-        y += gap
-    parts.append("</svg>")
-    return "\n".join(parts)
+#
+# NOTE: vote visualisation is now rendered inside the model's response
+# using text bars (█/░) to keep it in-context and copyable.
+#
 
 
 def _clean_cio_output(text: str) -> str:
@@ -402,6 +346,52 @@ def _has_alpha_ticker(text: str) -> bool:
         if word not in _NON_TICKER_WORDS:
             return True
     return False
+
+
+def _extract_primary_symbol(text: str) -> str | None:
+    """
+    Best-effort symbol extraction for conversation coreference.
+    Returns a normalised symbol like:
+      - 0700.HK (HKEX padded), 9618.HK, 8306.T
+      - NVDA, TSLA
+    """
+    import re as __re
+
+    raw = (text or "").strip()
+    if not raw:
+        return None
+
+    # Dotted numeric exchange: 300.HK, 9618.HK, 8306.T
+    m = __re.search(r"\b(\d{1,6})\.(HK|T|L|SS|SZ|KS|TW)\b", raw, __re.I)
+    if m:
+        num, exch = m.group(1), m.group(2).upper()
+        if exch == "HK":
+            num = str(int(num)).zfill(4)
+        return f"{num}.{exch}"
+
+    # Spaced numeric exchange: 300 HK, 8306 T
+    m = __re.search(r"(?<!\w)(\d{1,6})\s+(HK|T|L|SS|SZ|KS|TW|JP)(?!\w)", raw, __re.I)
+    if m:
+        num, exch = m.group(1), m.group(2).upper()
+        if exch == "HK":
+            num = str(int(num)).zfill(4)
+            return f"{num}.HK"
+        if exch in ("JP",):
+            return f"{num}.T"
+        return f"{num}.{exch}"
+
+    # Alpha tickers: NVDA, TSLA...
+    for mm in _US_TICKER_RE.finditer(raw):
+        w = mm.group(1).upper()
+        if w not in _NON_TICKER_WORDS:
+            return w
+    return None
+
+
+def _looks_like_coref_query(text: str) -> bool:
+    t = (text or "").lower()
+    coref = (" it ", " this ", " that ", " they ", " them ", " those ", " these ", " then ", " others ")
+    return any(k in f" {t} " for k in coref)
 
 
 def _detect_depth_hint(text: str) -> int:
@@ -1223,13 +1213,22 @@ if prompt:
     # Build conversation context (last 4 exchanges)
     history = st.session_state.messages[:-1]
     ctx_lines = [
-        f"{'User' if m['role']=='user' else 'CIO'}: {m['content'][:400]}"
+        f"{'User' if m['role']=='user' else 'CIO'}: {m['content'][:800]}"
         for m in history[-8:]
     ]
     context_block = "\n".join(ctx_lines)
+
+    # ── Coreference hint: remember the last explicit symbol ───────────────────
+    symbol = _extract_primary_symbol(prompt)
+    if symbol:
+        st.session_state.last_symbol = symbol
+    last_symbol = st.session_state.get("last_symbol")
+    coref_hint = ""
+    if (not symbol) and last_symbol and _looks_like_coref_query(prompt):
+        coref_hint = f"[Coreference hint] If the user says 'it/then/others', assume it refers to: {last_symbol}\n\n"
     base_query = (
-        f"[Conversation history]\n{context_block}\n\n[Current question]\n{prompt}"
-        if context_block else prompt
+        f"{coref_hint}[Conversation history]\n{context_block}\n\n[Current question]\n{prompt}"
+        if context_block else f"{coref_hint}{prompt}"
     )
     full_query = f"{hint_prefix}\n\n{base_query}" if hint_prefix else base_query
 
@@ -1410,10 +1409,6 @@ if prompt:
             if status == "ok":
                 response_text = content
                 st.markdown(_escape_currency(response_text))
-                vote = _extract_vote_pcts(response_text)
-                if vote:
-                    b, n, r = vote
-                    st.markdown(_vote_svg(b, n, r), unsafe_allow_html=True)
             else:
                 st.error(f"**Error:** {content}")
                 response_text = f"Error: {content}"

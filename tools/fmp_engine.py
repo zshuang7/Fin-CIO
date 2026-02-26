@@ -43,6 +43,7 @@ class FmpEngine(BaseTool):
         self._api_key = os.getenv("FMP_API_KEY", "").strip()
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
         self.register(self.get_consensus_data)
+        self.register(self.format_consensus_vote)
 
     # ── Cache helpers ─────────────────────────────────────────────────────────
     def _cache_path(self, key: str) -> Path:
@@ -307,4 +308,68 @@ class FmpEngine(BaseTool):
         }
         payload.update({"vote": vote, "market_sentiment": self._market_sentiment_label(vote)})
         return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    # ── Rendering helper (deterministic, prevents LLM hallucinations) ──────────
+    @staticmethod
+    def _bar(pct: float | None, width: int = 12) -> str:
+        if pct is None:
+            return "░" * width
+        filled = int(round(width * (pct / 100.0)))
+        filled = max(0, min(width, filled))
+        return ("█" * filled) + ("░" * (width - filled))
+
+    def format_consensus_vote(self, symbol: str) -> str:
+        """
+        Returns a pre-formatted, in-context vote tally (text bars) for the
+        Institutional & Expert Consensus module.
+        This avoids the model fabricating percentages.
+        """
+        sym = (symbol or "").upper().strip()
+        raw = self.get_consensus_data(sym)
+        try:
+            data = json.loads(raw)
+        except Exception:
+            data = {"symbol": sym, "error": "Invalid JSON from get_consensus_data"}
+
+        vote = (data.get("vote") or {}) if isinstance(data, dict) else {}
+        b = vote.get("bullish_pct")
+        n = vote.get("neutral_pct")
+        r = vote.get("bearish_pct")
+        total_votes = vote.get("total_votes")
+        sentiment = data.get("market_sentiment", "N/A") if isinstance(data, dict) else "N/A"
+        retrieved_at = data.get("retrieved_at") if isinstance(data, dict) else None
+
+        # Normalise for display
+        def fmt(x):
+            return "N/A" if x is None else f"{float(x):.1f}%"
+
+        lines = [
+            f"🏛️ Institutional & Expert Consensus: {sym}",
+            "[The Consensus Vote]",
+            f"🟢 Bullish: {fmt(b)} | 🟡 Neutral: {fmt(n)} | 🔴 Bearish: {fmt(r)}",
+        ]
+        if b is not None and n is not None and r is not None:
+            lines += [
+                f"🐂 Bullish  {self._bar(float(b))}  {fmt(b)}",
+                f"😐 Neutral  {self._bar(float(n))}  {fmt(n)}",
+                f"🐻 Bearish  {self._bar(float(r))}  {fmt(r)}",
+            ]
+        else:
+            lines.append("Vote Tally: N/A (no analyst vote distribution returned)")
+
+        if isinstance(total_votes, int):
+            lines.append(f"Total analyst votes: {total_votes}")
+
+        # Coverage sanity note (common for non-US tickers)
+        if total_votes == 0 and sym.endswith((".HK", ".T", ".L")):
+            lines.append("Coverage note: consensus vote may be unavailable for this non‑US ticker via FMP.")
+
+        lines.append(f"Market Sentiment: {sentiment}")
+        src = data.get("source", "FMP") if isinstance(data, dict) else "FMP"
+        if retrieved_at:
+            lines.append(f"Source: {src} | Retrieved: {retrieved_at}")
+        else:
+            lines.append(f"Source: {src}")
+
+        return "\n".join(lines)
 
