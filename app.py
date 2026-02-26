@@ -1211,6 +1211,7 @@ if prompt:
                 team, _ = load_agents()
                 chunks: list[str] = []
                 stream_seen: set[str] = set()
+                requires_consensus = _has_numeric_ticker(prompt) or _has_alpha_ticker(prompt)
 
                 # ── Streaming path ──────────────────────────────────────────
                 try:
@@ -1233,6 +1234,29 @@ if prompt:
 
                     raw_final = "".join(chunks).strip()
                     final = _clean_cio_output(raw_final)
+                    # Hard enforcement: stock queries MUST include the consensus module section.
+                    if requires_consensus and "Institutional & Expert Consensus" not in final:
+                        _emit("__text__Missing consensus module — retrying once with stricter instruction.")
+                        retry_query = (
+                            f"{full_query}\n\n"
+                            "CRITICAL FIX: Your previous answer omitted the mandatory section.\n"
+                            "Re-answer and include EXACTLY this section header and template:\n"
+                            "🏛️ Institutional & Expert Consensus: <SYMBOL>\n"
+                            "[The Consensus Vote]\n"
+                            "🟢 Bullish: <XX>% | 🟡 Neutral: <XX>% | 🔴 Bearish: <XX>%\n"
+                            "Market Sentiment: <...>\n"
+                            "[Expert Snippets & Evidence] (each line must include entity + date)\n"
+                            "[Final Synthesis]\n"
+                            "Do not include query analysis reports or tool chatter."
+                        )
+                        try:
+                            resp2 = team.run(retry_query)
+                            content2 = (
+                                resp2.content
+                                if hasattr(resp2, "content") and resp2.content
+                                else str(resp2)
+                            )
+                            final = _clean_cio_output(str(content2))
                     result_q.put(("ok", final or "[No response generated]"))
 
                 except Exception:
@@ -1244,7 +1268,24 @@ if prompt:
                             if hasattr(resp, "content") and resp.content
                             else str(resp)
                         )
-                        result_q.put(("ok", content))
+                        cleaned = _clean_cio_output(str(content))
+                        if requires_consensus and "Institutional & Expert Consensus" not in cleaned:
+                            _emit("__text__Missing consensus module — retrying once with stricter instruction.")
+                            retry_query = (
+                                f"{full_query}\n\n"
+                                "CRITICAL FIX: Include the mandatory section header:\n"
+                                "🏛️ Institutional & Expert Consensus: <SYMBOL>\n"
+                                "with vote + dated expert snippets.\n"
+                                "Do not include query analysis reports."
+                            )
+                            resp2 = team.run(retry_query)
+                            content2 = (
+                                resp2.content
+                                if hasattr(resp2, "content") and resp2.content
+                                else str(resp2)
+                            )
+                            cleaned = _clean_cio_output(str(content2))
+                        result_q.put(("ok", cleaned))
 
             except Exception as exc:
                 result_q.put(("err", str(exc)))
