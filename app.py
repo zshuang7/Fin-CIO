@@ -225,6 +225,42 @@ def _parse_log(raw: str, seen_agents: set) -> str | None:
             return f"  ↳ {friendly}{arg_hint}"
     return None
 
+# ── Pre-flight depth hint ──────────────────────────────────────────────────────
+def _detect_depth_hint(text: str) -> int:
+    """
+    Fast client-side depth heuristic (runs in microseconds, no API call).
+    Returns 1 or 2 to tell the CIO it can skip sub-agents, or 0 meaning
+    'let the CIO decide via its own depth-level assessment'.
+    """
+    t = text.lower().strip()
+    words = t.split()
+    wc = len(words)
+
+    # Explicit fast-path keywords override everything
+    if any(w in t for w in ["quick", "brief", "tldr", "tl;dr", "just tell",
+                              "one sentence", "一句话", "简单说", "简短"]):
+        return 1
+
+    # Pure concept question (≤ 10 words)
+    concept_starts = ("what is", "what are", "what's a", "explain ", "define ",
+                      "how does", "how do ", "what does", "什么是", "如何理解")
+    if wc <= 10 and any(t.startswith(s) or s in t for s in concept_starts):
+        return 1
+
+    # Very short query → Level 1 regardless of content
+    if wc <= 4:
+        return 1
+
+    # Short casual stock question → Level 2
+    deep_kw = ("analyz", "analysis", "research", "deep dive", "comprehensive",
+               "detailed", "全面", "详细", "深度", "research note", "thesis",
+               "should i invest", "worth investing", "值得投资", "帮我写")
+    if wc <= 10 and not any(k in t for k in deep_kw):
+        return 2
+
+    return 0  # let the CIO assess
+
+
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="FinAgent CIO",
@@ -957,6 +993,15 @@ if prompt:
         st.markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
 
+    # Pre-flight depth hint — injected as first line so the CIO reads it before
+    # anything else, preventing unnecessary sub-agent calls for simple queries.
+    depth_hint = _detect_depth_hint(prompt)
+    _HINT_LABELS = {
+        1: "[FAST-PATH Level 1: answer INSTANTLY from knowledge. ZERO tool calls. ≤100 words.]",
+        2: "[FAST-PATH Level 2: skip QueryAnalyst. AT MOST 1 sub-agent call. ≤250 words.]",
+    }
+    hint_prefix = _HINT_LABELS.get(depth_hint, "")
+
     # Build conversation context (last 4 exchanges)
     history = st.session_state.messages[:-1]
     ctx_lines = [
@@ -964,10 +1009,11 @@ if prompt:
         for m in history[-8:]
     ]
     context_block = "\n".join(ctx_lines)
-    full_query = (
+    base_query = (
         f"[Conversation history]\n{context_block}\n\n[Current question]\n{prompt}"
         if context_block else prompt
     )
+    full_query = f"{hint_prefix}\n\n{base_query}" if hint_prefix else base_query
 
     # ── Run agent with live activity log ──────────────────────────────────
     with st.chat_message("assistant", avatar="🤖"):

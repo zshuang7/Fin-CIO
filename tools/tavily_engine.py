@@ -88,6 +88,13 @@ class TavilyEngine(BaseTool):
             # This MUST run before Tavily and before any year/market heuristics.
             pre_numeric_tickers = _extract_numeric_tickers(user_input)
 
+            # ── Step 0.5: Fast local path — skip Tavily for obvious cases ──
+            # Saves 3-5 seconds per query for concept questions, known tickers,
+            # and very short phrases that don't need a web search to classify.
+            fast_result = _try_local_understand(user_input, pre_numeric_tickers)
+            if fast_result is not None:
+                return fast_result
+
             # Attempt 1 – full query
             search_q = _build_query(user_input)
 
@@ -416,6 +423,141 @@ def _format_results(query: str, resp: dict, is_news: bool = False) -> str:
             f"     Source: {url}",
             "",
         ]
+    return "\n".join(lines)
+
+
+def _try_local_understand(raw: str, pre_numeric: list[str]) -> str | None:
+    """
+    Fast local intent classification that SKIPS the Tavily API entirely.
+
+    Returns a formatted understanding string (same shape as the Tavily path)
+    when the query is unambiguous enough to classify locally, saving 3-5 s.
+    Returns None to signal "fall through to Tavily" for ambiguous queries.
+
+    Fast-path cases:
+      1. Pure concept / educational questions  ("what is P/E", "explain DCF")
+      2. Numeric-ticker-only queries           ("2015 HK", "compare 1211 HK with 2015 HK")
+      3. Very short known-ticker queries       ("TSLA?", "NVDA stock", "how's AAPL")
+    """
+    import re
+    r = raw.lower().strip()
+    words = r.split()
+    word_count = len(words)
+
+    # ── Case 1: Concept / educational ────────────────────────────────────
+    concept_triggers = [
+        "what is", "what's a", "what are", "explain ", "how does", "how do",
+        "define ", "meaning of", "difference between", "what does",
+        "什么是", "如何理解", "解释", "怎么算",
+        "p/e ratio", "p/e multiple", "eps mean", "fcf mean", "dcf mean",
+        "wacc", "capm", "roi mean", "ebitda mean",
+    ]
+    is_concept = any(r.startswith(t) or t in r for t in concept_triggers)
+    if is_concept and word_count <= 12:
+        q_type = "CONCEPT_EXPLANATION"
+        tickers: list[str] = _extract_tickers(raw, pre_numeric)
+        return _local_understanding(raw, q_type, tickers, "", "", [
+            "Answer directly from knowledge. No sub-agents needed.",
+            "Concise definition + practical example. 2-4 sentences max.",
+        ])
+
+    # ── Case 2: Numeric-ticker-only queries (always unambiguous) ─────────
+    if pre_numeric:
+        # Determine COMPARISON vs STOCK_ANALYSIS
+        compare_kw = ["vs", "versus", "compare", "比较", "对比", "with", "和", "与",
+                      "against"]
+        q_type = "COMPARISON" if any(w in r for w in compare_kw) else "STOCK_ANALYSIS"
+        tickers = list(pre_numeric) + [
+            t for t in _extract_tickers(raw, pre_numeric)
+            if t not in pre_numeric
+        ]
+        time_period = _extract_time_period(raw, "", pre_numeric)
+        note = (
+            "⚠  TICKER DISAMBIGUATION: Numeric exchange codes detected → "
+            + ", ".join(pre_numeric)
+            + "  These are STOCK TICKERS, NOT year references."
+        )
+        approach = (
+            [f"COMPARISON: run STOCK_ANALYSIS for each of: {', '.join(tickers[:4])}"]
+            if q_type == "COMPARISON"
+            else [f"STOCK_ANALYSIS for {tickers[0] if tickers else 'ticker'}",
+                  "CompanyAgent + NewsAgent → CIO synthesis"]
+        )
+        return _local_understanding(raw, q_type, tickers, time_period, note, approach)
+
+    # ── Case 3: Very short query with a clear ticker-like token ──────────
+    # E.g. "TSLA?", "NVDA stock", "how's AAPL", "Apple stock price", "BYD怎么样"
+    short_stock_pattern = re.compile(
+        r'\b([A-Z]{1,5})\b', flags=re.IGNORECASE
+    )
+    explicit_tickers = [
+        t.upper() for t in short_stock_pattern.findall(raw)
+        if t.upper() not in {
+            "THE", "AND", "FOR", "ARE", "BUT", "NOT", "HOW", "ITS", "MAY",
+            "NEW", "NOW", "OLD", "SEE", "WHO", "HK", "US", "UK", "AI",
+            "IS", "IT", "IN", "OF", "TO", "A", "AN", "BE", "OR", "IF",
+        }
+    ]
+    # Also check name map
+    name_map_quick = {
+        "tesla": "TSLA", "apple": "AAPL", "nvidia": "NVDA", "microsoft": "MSFT",
+        "google": "GOOGL", "alphabet": "GOOGL", "amazon": "AMZN", "meta": "META",
+        "netflix": "NFLX", "tencent": "0700.HK", "腾讯": "0700.HK",
+        "alibaba": "BABA", "byd": "1211.HK", "li auto": "2015.HK",
+        "苹果": "AAPL", "特斯拉": "TSLA", "英伟达": "NVDA",
+    }
+    for name, sym in name_map_quick.items():
+        if name in r and sym not in explicit_tickers:
+            explicit_tickers.append(sym)
+
+    # Only trigger fast-path for short queries where intent is clearly stock-related
+    stock_context = any(w in r for w in [
+        "stock", "price", "share", "worth", "buy", "sell", "hold",
+        "invest", "好不好", "怎么样", "值得", "涨", "跌", "跑",
+        "hows", "how's", "thoughts on", "what about", "tell me about",
+    ])
+    if explicit_tickers and word_count <= 8 and (stock_context or word_count <= 4):
+        q_type = "STOCK_ANALYSIS"
+        time_period = _extract_time_period(raw, "", None)
+        return _local_understanding(
+            raw, q_type, explicit_tickers[:3], time_period, "",
+            [
+                f"STOCK_ANALYSIS for {explicit_tickers[0]}",
+                "CompanyAgent (quick fundamentals) + optional NewsAgent",
+                "CIO: concise snapshot answer",
+            ],
+        )
+
+    # Not fast-path eligible — fall through to Tavily
+    return None
+
+
+def _local_understanding(raw: str, q_type: str, tickers: list[str],
+                         time_period: str, note: str,
+                         approach: list[str]) -> str:
+    """Format a local (no-Tavily) query understanding block."""
+    sep = "═" * 58
+    lines = [
+        sep,
+        "  QUERY UNDERSTANDING (Local Fast-Path — no web search needed)",
+        sep,
+    ]
+    if note:
+        lines += [f"  {note}", ""]
+    lines += [
+        f"  Raw Input    : {raw}",
+        f"  Query Type   : {q_type}",
+        f"  Tickers Found: {', '.join(tickers) if tickers else 'N/A'}",
+        f"  Market/Index : N/A (classified locally)",
+        f"  Time Period  : {time_period or 'Current / Present'}",
+        "",
+        "  AI Context from Web: (skipped — query is unambiguous locally)",
+        "",
+        "  Recommended Analysis Approach:",
+    ]
+    for step in approach:
+        lines.append(f"    → {step}")
+    lines.append(sep)
     return "\n".join(lines)
 
 
