@@ -229,6 +229,7 @@ def _parse_log(raw: str, seen_agents: set) -> str | None:
 # Safety net: strips any system-thinking lines that leak into the final response
 # even after show_members_responses=False.  Applied after collecting all stream chunks.
 _SYSTEM_LINE_PREFIXES = (
+    "analysis complete",
     "i'll analyze", "let me ", "i will ", "i'm going to ", "i need to ",
     "based on my analysis", "now i'll", "now let me", "let's start",
     "i've gathered", "i've analyzed", "i'll now", "i'll provide",
