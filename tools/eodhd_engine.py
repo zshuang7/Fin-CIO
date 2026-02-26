@@ -346,14 +346,16 @@ class EODHDEngine(BaseTool):
         # Phase 2: News context
         news_text = self.get_analyst_news(ticker, limit=10)
 
-        # Phase 3: Cross-verification note
+        # Phase 3: Cross-verification + data freshness note
+        retrieved_at = datetime.now().strftime("%Y-%m-%d %H:%M UTC")
         xv_note = (
-            "\n## Cross-Verification Note\n"
-            "  Compare EODHD's consensus target price (above) against:\n"
-            "    • yfinance live price (CompanyAgent)\n"
-            "    • Tavily wall_street_search (WallStreetAgent deep context)\n"
-            "  Flag any discrepancy > 15% as a HIGH-PRIORITY data conflict.\n"
-            f"  Data freshness: EODHD cache TTL = {_CACHE_TTL_HOURS}h"
+            "\n## Cross-Verification & Data Freshness\n"
+            f"  EODHD data retrieved: {retrieved_at}  (cache TTL = {_CACHE_TTL_HOURS}h)\n"
+            "  ⚠  CIO must compare this retrieval date against:\n"
+            "     • yfinance financial data date (from get_financial_summary)\n"
+            "     • Most recent news date (from NewsAgent)\n"
+            "  If financial data is > 6 months older than latest news → flag DATA GAP.\n"
+            "  Flag any price-target discrepancy > 15% as a HIGH-PRIORITY data conflict."
         )
 
         return "\n\n".join([

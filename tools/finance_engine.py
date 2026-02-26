@@ -52,6 +52,35 @@ class FinanceEngine(BaseTool):
 
     # ── Public tool functions ────────────────────────────────────────────
 
+    @staticmethod
+    def _freshness_tag(ts_unix: int | float | None = None,
+                       date_str: str | None = None) -> str:
+        """
+        Build a human-readable data-freshness note.
+        Pass either a Unix timestamp (from yfinance) or an ISO date string.
+        Returns a coloured tag the CIO can quote in its output.
+        """
+        from datetime import datetime as _dt
+        try:
+            if ts_unix:
+                data_date = _dt.fromtimestamp(int(ts_unix))
+            elif date_str:
+                data_date = _dt.fromisoformat(str(date_str)[:10])
+            else:
+                return "[DATA DATE: Unknown — verify from official filings]"
+
+            days_ago = (_dt.now() - data_date).days
+            label = data_date.strftime("%Y-%m-%d")
+            if days_ago > 365:
+                flag = "⚠️ STALE >1yr"
+            elif days_ago > 180:
+                flag = "⚠️ STALE >6mo"
+            else:
+                flag = "✓ Recent"
+            return f"[DATA AS OF: {label}  ({days_ago}d ago)  {flag}]"
+        except Exception:
+            return "[DATA DATE: Unknown]"
+
     def get_financial_summary(self, ticker: str) -> str:
         """
         Returns a formatted text summary of the stock's key valuation
@@ -69,9 +98,15 @@ class FinanceEngine(BaseTool):
             div_yield = info.get("dividendYield")
             div_str = f"{round(div_yield * 100, 2)}%" if div_yield else "N/A"
 
+            # ── Data freshness ───────────────────────────────────────────────
+            freshness = self._freshness_tag(
+                ts_unix=info.get("mostRecentQuarter") or info.get("earningsTimestamp"),
+            )
+
             lines = [
                 f"{'=' * 55}",
                 f"  {state.company_name} ({ticker.upper()})",
+                f"  {freshness}",
                 f"{'=' * 55}",
                 f"  Current Price   : {info.get('currentPrice', info.get('regularMarketPrice', 'N/A'))}",
                 f"  Market Cap      : {self._fmt_large(info.get('marketCap'))}",
@@ -109,9 +144,14 @@ class FinanceEngine(BaseTool):
                     "Net Income", "EBITDA"]
             rows = subset.loc[[r for r in want if r in subset.index]]
 
+            # ── Data freshness: most recent column = most recent fiscal year ──
+            most_recent = str(subset.columns[0])[:10] if not subset.empty else None
+            freshness = self._freshness_tag(date_str=most_recent)
+
             # Write to SharedState
             get_state().income_data = rows.to_dict()
-            return f"Income Statement — {ticker.upper()} (last {years} yrs):\n{rows.to_string()}"
+            header = f"Income Statement — {ticker.upper()} (last {years} yrs)  {freshness}"
+            return f"{header}\n{rows.to_string()}"
         except Exception as e:
             logger.error(f"[finance_engine] get_income_statement({ticker}): {e}")
             return f"Error: {e}"
