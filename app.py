@@ -225,6 +225,69 @@ def _parse_log(raw: str, seen_agents: set) -> str | None:
             return f"  ↳ {friendly}{arg_hint}"
     return None
 
+# ── CIO output post-processor ─────────────────────────────────────────────────
+# Safety net: strips any system-thinking lines that leak into the final response
+# even after show_members_responses=False.  Applied after collecting all stream chunks.
+_SYSTEM_LINE_PREFIXES = (
+    "i'll analyze", "let me ", "i will ", "i'm going to ", "i need to ",
+    "based on my analysis", "now i'll", "now let me", "let's start",
+    "i've gathered", "i've analyzed", "i'll now", "i'll provide",
+    "i'll coordinate", "i'll delegate",
+    "understand_query(", "finance_search(", "news_search(", "web_search(",
+    "get_financial_summary(", "get_income_statement(", "get_macro_indicator(",
+    "get_company_news(", "wall_street_search(", "get_wall_street_breakdown(",
+    "completed in ", ".0s.", ".1s.", ".2s.", ".3s.", ".4s.", ".5s.",
+    "query analysis report", "1. query type", "2. identified ticker",
+    "3. user intent", "4. key context", "5. recommended", "6. priority",
+    "7. suggested analysis",
+)
+
+def _clean_cio_output(text: str) -> str:
+    """
+    Remove any residual system-thinking lines or verbose QueryAnalyst reports
+    from the CIO's final response.  Lines that start with known system-thinking
+    phrases are dropped; the rest is reassembled.
+    """
+    if not text:
+        return text
+
+    lines = text.split("\n")
+    cleaned: list[str] = []
+    skip_block = False   # True while inside a numbered-list "report" block
+
+    for line in lines:
+        stripped = line.strip()
+        lower = stripped.lower()
+
+        # Detect start of a numbered report block (e.g. "1. Query Type Classification")
+        if _re.match(r'^[1-9]\d?\.\s+[A-Z]', stripped) and len(stripped) < 80:
+            # Only skip if it looks like internal report boilerplate
+            if any(kw in lower for kw in ["query type", "ticker", "user intent",
+                                           "key context", "recommended analysis",
+                                           "priority area", "suggested analysis"]):
+                skip_block = True
+        # A markdown header or blank line ends a skip block
+        if stripped.startswith("##") or stripped.startswith("**") or stripped == "":
+            skip_block = False
+
+        if skip_block:
+            continue
+
+        # Drop individual system-thinking lines
+        if any(lower.startswith(p) for p in _SYSTEM_LINE_PREFIXES):
+            continue
+        # Drop lines that look like raw tool call completions
+        if _re.search(r'completed in \d+\.\d+s', line):
+            continue
+
+        cleaned.append(line)
+
+    result = "\n".join(cleaned).strip()
+    # Collapse runs of 3+ blank lines into 2
+    result = _re.sub(r'\n{3,}', '\n\n', result)
+    return result
+
+
 # ── Pre-flight depth hint ──────────────────────────────────────────────────────
 import re as _re
 
@@ -1118,7 +1181,8 @@ if prompt:
                                     and line.count("|") < 4):
                                 _emit(f"__text__{line}")
 
-                    final = "".join(chunks).strip()
+                    raw_final = "".join(chunks).strip()
+                    final = _clean_cio_output(raw_final)
                     result_q.put(("ok", final or "[No response generated]"))
 
                 except Exception:
