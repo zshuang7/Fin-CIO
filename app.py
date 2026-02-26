@@ -242,6 +242,22 @@ _SYSTEM_LINE_PREFIXES = (
     "7. suggested analysis",
 )
 
+def _escape_currency(text: str) -> str:
+    """
+    Prevent Streamlit / KaTeX from mis-parsing currency dollar signs as LaTeX
+    math delimiters.  e.g. 'HK$518.5' would otherwise render as 'HK' followed
+    by a broken inline-math expression, causing the character-by-character
+    display bug.  Replace $ with the Unicode full-width ＄ (U+FF04) which
+    looks identical in the UI but is not a KaTeX trigger.
+    """
+    if not text:
+        return text
+    # Only escape $ that is followed by a digit, decimal, or comma (currency use).
+    # Leave $ alone when it's part of a Markdown code block (```) or HTML.
+    result = _re.sub(r'\$(?=[\d,.])', '＄', text)
+    return result
+
+
 def _clean_cio_output(text: str) -> str:
     """
     Remove any residual system-thinking lines or verbose QueryAnalyst reports
@@ -1251,7 +1267,7 @@ if prompt:
             status, content = result_q.get()
             if status == "ok":
                 response_text = content
-                st.markdown(response_text)
+                st.markdown(_escape_currency(response_text))
             else:
                 st.error(f"**Error:** {content}")
                 response_text = f"Error: {content}"
