@@ -394,6 +394,37 @@ def _looks_like_coref_query(text: str) -> bool:
     return any(k in f" {t} " for k in coref)
 
 
+def _extract_verdict(text: str) -> str | None:
+    """Extract BUY/HOLD/SELL from the last answer if present."""
+    if not text:
+        return None
+    m = _re.search(r"\*\*(BUY|HOLD|SELL)\*\*", text, _re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    m = _re.search(r"\b(BUY|HOLD|SELL)\b\s*\|", text, _re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    return None
+
+
+def _extract_key_risk(text: str) -> str | None:
+    """Grab one representative risk line if present."""
+    if not text:
+        return None
+    # Look for the Key Risks section and take first bullet-ish line.
+    idx = text.find("## ⚠️")
+    if idx == -1:
+        idx = text.find("Key Risks")
+    if idx == -1:
+        return None
+    tail = text[idx: idx + 800]
+    for line in tail.split("\n"):
+        s = line.strip(" -•\t")
+        if len(s) >= 20 and not s.lower().startswith(("##", "key risks")):
+            return s[:140]
+    return None
+
+
 def _detect_depth_hint(text: str) -> int:
     """
     Fast client-side depth heuristic (runs in microseconds, no API call).
@@ -1093,6 +1124,30 @@ with st.sidebar:
     # Reports output folder (local only — cloud uses ephemeral storage)
     output_dir = st.text_input("Reports Folder", value="reports")
 
+    # ── Data Source Health (demo-grade reliability signal) ─────────────────────
+    st.markdown("<hr style='margin:8px 0;border:none;border-top:1px solid #222'>",
+                unsafe_allow_html=True)
+    st.markdown("### Data Source Health")
+
+    def _has_key(env_key: str) -> bool:
+        v = os.getenv(env_key, "")
+        return bool(v and str(v).strip())
+
+    providers = [
+        ("LLM (DeepSeek)", "DEEPSEEK_API_KEY", "Reasoning + synthesis"),
+        ("Search (Tavily)", "TAVILY_API_KEY", "Grounded web + institutional snippets"),
+        ("Consensus (FMP)", "FMP_API_KEY", "Analyst vote distribution"),
+        ("Media (Polygon)", "POLYGON_API_KEY", "US ticker news"),
+        ("Media (NewsData.io)", "NEWSDATA_API_KEY", "Global business news"),
+        ("Analyst (EODHD)", "EODHD_API_KEY", "Analyst ratings/news (fallback)"),
+        ("Market (Finnhub)", "FINNHUB_API_KEY", "US-only: ratings/news/earnings"),
+        ("Macro (Alpha Vantage)", "ALPHA_VANTAGE_API_KEY", "Macro indicators + sentiment"),
+    ]
+    for name, key, why in providers:
+        ok = _has_key(key)
+        status = "✅ Connected" if ok else "⚠ Missing"
+        st.markdown(f"- **{name}**: {status}  \n  <span style='color:#9ca3af'>{why}</span>", unsafe_allow_html=True)
+
     st.markdown("<hr style='margin:8px 0;border:none;border-top:1px solid #222'>",
                 unsafe_allow_html=True)
 
@@ -1156,7 +1211,61 @@ def _apply_config():
 # ── Header ─────────────────────────────────────────────────────────────────────
 st.markdown("# FinAgent CIO")
 st.markdown("AI-Powered Investment Research Assistant")
+
+# ── Demo prompts row (one-click interview flow) ───────────────────────────────
+st.markdown("**Demo prompts (one click):**")
+demo_prompts = [
+    ("ORCL", "Comprehensive analysis for ORCL (professional)"),
+    ("NVDA", "How's NVDA? (fast snapshot)"),
+    ("9618.HK", "Comprehensive analysis for 9618 HK (JD.com Hong Kong)"),
+    ("BTCUSD", "Is BTCUSD bullish or bearish? include consensus + latest news"),
+]
+cols = st.columns(len(demo_prompts))
+for i, (label, q) in enumerate(demo_prompts):
+    with cols[i]:
+        if st.button(label, width="stretch", key=f"demo_{label}"):
+            st.session_state["prefill_query"] = q
+            st.rerun()
+
 st.divider()
+
+# ── Executive view (surface the two mandatory modules) ────────────────────────
+def _extract_block(text: str, start: str, end_markers: list[str]) -> str | None:
+    if not text or start not in text:
+        return None
+    s = text.index(start)
+    tail = text[s:]
+    end_pos = len(tail)
+    for m in end_markers:
+        if m in tail[1:]:
+            p = tail.find(m, 1)
+            if 0 <= p < end_pos:
+                end_pos = p
+    return tail[:end_pos].strip()
+
+last_assistant = None
+for m in reversed(st.session_state.messages):
+    if m.get("role") == "assistant" and (m.get("content") or "").strip():
+        last_assistant = m.get("content")
+        break
+
+if last_assistant:
+    consensus = _extract_block(
+        last_assistant,
+        "🏛️ Institutional & Expert Consensus",
+        ["## 📰 Latest Media News Analysis", "## 🎯", "## 📊", "## 🌐", "## ⚠️", "## 🚀"],
+    )
+    media = _extract_block(
+        last_assistant,
+        "## 📰 Latest Media News Analysis",
+        ["## 🎯", "## 📊", "## 🌐", "## ⚠️", "## 🚀", "🏛️ Institutional & Expert Consensus"],
+    )
+    if consensus or media:
+        with st.expander("Executive View (latest answer)", expanded=True):
+            if consensus:
+                st.markdown(consensus)
+            if media:
+                st.markdown(media)
 
 # ── Render conversation history ────────────────────────────────────────────────
 # Only render the most recent 12 messages to keep browser memory low.
@@ -1226,9 +1335,18 @@ if prompt:
     coref_hint = ""
     if (not symbol) and last_symbol and _looks_like_coref_query(prompt):
         coref_hint = f"[Coreference hint] If the user says 'it/then/others', assume it refers to: {last_symbol}\n\n"
+
+    # ── Lightweight memory bullets (no extra model calls) ─────────────────────
+    mem_lines: list[str] = []
+    mem = st.session_state.get("memory_bullets") or []
+    if isinstance(mem, list) and mem:
+        mem_lines = [f"- {x}" for x in mem[:3] if isinstance(x, str) and x.strip()]
+    memory_block = ""
+    if mem_lines:
+        memory_block = "[Memory]\n" + "\n".join(mem_lines) + "\n\n"
     base_query = (
-        f"{coref_hint}[Conversation history]\n{context_block}\n\n[Current question]\n{prompt}"
-        if context_block else f"{coref_hint}{prompt}"
+        f"{coref_hint}{memory_block}[Conversation history]\n{context_block}\n\n[Current question]\n{prompt}"
+        if context_block else f"{coref_hint}{memory_block}{prompt}"
     )
     full_query = f"{hint_prefix}\n\n{base_query}" if hint_prefix else base_query
 
@@ -1417,6 +1535,23 @@ if prompt:
             response_text = "Error: timed out."
 
     st.session_state.messages.append({"role": "assistant", "content": response_text})
+
+    # Update lightweight memory bullets for follow-ups (no extra tool calls)
+    try:
+        last_sym = st.session_state.get("last_symbol")
+        verdict = _extract_verdict(response_text)
+        key_risk = _extract_key_risk(response_text)
+        bullets: list[str] = []
+        if last_sym:
+            bullets.append(f"Last symbol: {last_sym}")
+        if verdict:
+            bullets.append(f"Last CIO verdict: {verdict}")
+        if key_risk:
+            bullets.append(f"Key risk noted: {key_risk}")
+        if bullets:
+            st.session_state.memory_bullets = bullets[:3]
+    except Exception:
+        pass
 
     # Auto-save conversation after every exchange
     if not st.session_state.conv_title and st.session_state.messages:

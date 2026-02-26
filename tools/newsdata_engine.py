@@ -127,13 +127,36 @@ class NewsDataEngine(BaseTool):
                 date = (r.get("pubDate") or r.get("publishedAt") or "")[:10]
                 items.append(
                     {
-                        "date": date,
+                        "date": date or "Date unknown",
                         "source": r.get("source_id") or r.get("source") or "Unknown",
                         "title": (r.get("title") or "")[:220],
                         "url": r.get("link") or r.get("url") or "",
                         "summary": (r.get("description") or r.get("content") or "")[:240],
                     }
                 )
+
+        # Light de-dupe: same host + similar title
+        def _host(url: str) -> str:
+            try:
+                from urllib.parse import urlparse
+                return (urlparse(url).netloc or "").lower()
+            except Exception:
+                return ""
+
+        def _norm_title(t: str) -> str:
+            import re
+            return " ".join(re.findall(r"[a-z0-9]+", (t or "").lower()))[:140]
+
+        seen = set()
+        deduped: list[dict] = []
+        for it in items:
+            host = _host(it.get("url", ""))
+            key = (host, _norm_title(it.get("title", ""))[:80])
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(it)
+        items = deduped
 
         payload = {
             "query": q,

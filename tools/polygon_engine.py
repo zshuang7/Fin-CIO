@@ -144,13 +144,29 @@ class PolygonEngine(BaseTool):
                 date = (r.get("published_utc") or "")[:10]
                 items.append(
                     {
-                        "date": date,
-                        "source": self._norm_source(r.get("publisher")),
+                        "date": date or "Date unknown",
+                        "source": self._norm_source(r.get("publisher")) or "Unknown",
                         "title": (r.get("title") or "")[:220],
                         "url": r.get("article_url") or "",
                         "summary": (r.get("description") or "")[:240],
                     }
                 )
+
+        # Light de-dupe: collapse same host + similar title
+        def _norm_title(t: str) -> str:
+            import re
+            return " ".join(re.findall(r"[a-z0-9]+", (t or "").lower()))[:140]
+
+        seen = set()
+        deduped: list[dict] = []
+        for it in items:
+            host = self._host(it.get("url", ""))
+            key = (host, _norm_title(it.get("title", ""))[:80])
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(it)
+        items = deduped
 
         payload = {
             "ticker": t,
