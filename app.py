@@ -450,6 +450,25 @@ def _detect_depth_hint(text: str) -> int:
     if any(k in t for k in deep_kw):
         return 4
 
+    # ── Comparison queries must be Level 3+ (need 2 tickers + table) ──────────
+    # Without this, "compare TGT with WMT" becomes Level 2 and the CIO won't
+    # run the multi-agent comparison workflow.
+    def _count_symbols_quick(raw: str) -> int:
+        import re as __re
+        syms: set[str] = set()
+        # Numeric exchange codes (may appear multiple times)
+        for m in __re.finditer(r"(?<!\w)\d{1,6}(?:\s+|\.)(?:HK|T|L|SS|SZ|KS|TW|JP)(?!\w)", raw, __re.I):
+            syms.add(m.group(0).upper().replace(" ", ""))
+        # Alpha tickers
+        for mm in _US_TICKER_RE.finditer(raw):
+            w = mm.group(1).upper()
+            if w not in _NON_TICKER_WORDS:
+                syms.add(w)
+        return len(syms)
+
+    if any(k in t for k in ("compare", "vs", "versus")) and _count_symbols_quick(text) >= 2:
+        return 3
+
     # ── Guard: numeric exchange tickers must call CompanyAgent (never L1) ──
     if _has_numeric_ticker(text):
         return 2
@@ -1391,6 +1410,7 @@ if prompt:
                 chunks: list[str] = []
                 stream_seen: set[str] = set()
                 requires_consensus = _has_numeric_ticker(prompt) or _has_alpha_ticker(prompt)
+                requires_scorecard = any(k in (prompt or "").lower() for k in ("compare", "vs", "versus"))
 
                 # ── Streaming path ──────────────────────────────────────────
                 try:
@@ -1438,6 +1458,32 @@ if prompt:
                             final = _clean_cio_output(str(content2))
                         except Exception:
                             _emit("__text__Consensus retry failed — returning best available answer.")
+
+                    # Hard enforcement: comparison queries MUST include the scorecard table
+                    if requires_scorecard and "## 📊 Comparative Analysis" not in final:
+                        _emit("__text__Missing comparative analysis — retrying once with stricter instruction.")
+                        retry_query = (
+                            f"{full_query}\n\n"
+                            "CRITICAL FIX: Your previous answer omitted the mandatory comparison section.\n"
+                            "Re-answer and include EXACTLY this structure:\n"
+                            "## 📊 Comparative Analysis\n"
+                            "**Macro & Sector Context:** (3-4 bullets)\n"
+                            "**Financial Performance Comparison:** (table with real numbers, trends with → arrows, Advantage column)\n"
+                            "**Strategic Positioning:** (per-ticker bullets)\n"
+                            "**Recent News & Sentiment:** (per-ticker bullets)\n"
+                            "Then ## 🏛️ Institutional & Expert Consensus + ## 🎯 CIO Verdict.\n"
+                            "Use REAL data from the agents. Do not include tool chatter."
+                        )
+                        try:
+                            resp3 = team.run(retry_query)
+                            content3 = (
+                                resp3.content
+                                if hasattr(resp3, "content") and resp3.content
+                                else str(resp3)
+                            )
+                            final = _clean_cio_output(str(content3))
+                        except Exception:
+                            _emit("__text__Scorecard retry failed — returning best available answer.")
                     result_q.put(("ok", final or "[No response generated]"))
 
                 except Exception:
@@ -1469,6 +1515,29 @@ if prompt:
                                 cleaned = _clean_cio_output(str(content2))
                             except Exception:
                                 _emit("__text__Consensus retry failed — returning best available answer.")
+
+                        if requires_scorecard and "## 📊 Comparative Analysis" not in cleaned:
+                            _emit("__text__Missing comparative analysis — retrying once with stricter instruction.")
+                            retry_query = (
+                                f"{full_query}\n\n"
+                                "CRITICAL FIX: Include the mandatory structure:\n"
+                                "## 📊 Comparative Analysis\n"
+                                "**Macro & Sector Context:** (bullets)\n"
+                                "**Financial Performance Comparison:** (table with real numbers + Advantage column)\n"
+                                "**Strategic Positioning:** + **Recent News & Sentiment:** (per-ticker)\n"
+                                "Then ## 🏛️ Institutional & Expert Consensus + ## 🎯 CIO Verdict.\n"
+                                "Use REAL data. Do not include tool chatter."
+                            )
+                            try:
+                                resp3 = team.run(retry_query)
+                                content3 = (
+                                    resp3.content
+                                    if hasattr(resp3, "content") and resp3.content
+                                    else str(resp3)
+                                )
+                                cleaned = _clean_cio_output(str(content3))
+                            except Exception:
+                                _emit("__text__Scorecard retry failed — returning best available answer.")
                         result_q.put(("ok", cleaned))
 
             except Exception as exc:
