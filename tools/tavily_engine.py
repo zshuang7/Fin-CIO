@@ -589,22 +589,33 @@ def _extract_numeric_tickers(raw: str) -> list[str]:
     import re
     found: list[str] = []
 
-    # Format 1: explicit dotted (highest confidence)
+    # Format 1: explicit dotted (highest confidence).
+    # HKEX tickers must be zero-padded to 4 digits for yfinance compatibility:
+    #   "300.HK" → "0300.HK",  "5.HK" → "0005.HK"
     dotted = re.findall(
         r'\b(\d{1,6})\.(HK|T|L|SS|SZ|KS|TW|PA|DE|AS|BR|AX|NS|BO)\b',
         raw, re.I,
     )
     for num, exch in dotted:
-        t = f"{num}.{exch.upper()}"
+        exch_upper = exch.upper()
+        if exch_upper == "HK":
+            num_norm = str(int(num)).zfill(4)   # 300 → 0300, 9988 → 9988
+        else:
+            num_norm = num
+        t = f"{num_norm}.{exch_upper}"
         if t not in found:
             found.append(t)
 
-    # Format 2: "NNNN HK" — most common ambiguity (HKEX, 4–5 digits + space + HK)
-    # Requires a word boundary before the number and after HK to avoid matching
-    # substrings like "in 2015 HKD" (HKD would be matched by HK if we're not careful)
+    # Format 2: "NNN HK" / "NNNN HK" / "NNNNN HK" — HKEX numeric tickers.
+    # CRITICAL: yfinance requires 4-digit HKEX codes with leading zeros.
+    #   "300 HK"  → "0300.HK"  (Minth Group, NOT "300.HK")
+    #   "5 HK"    → "0005.HK"  (HSBC HK)
+    #   "700 HK"  → "0700.HK"  (Tencent)
+    #   "9988 HK" → "9988.HK"  (Alibaba — already 4 digits, no change)
     hk_spaced = re.findall(r'(?<!\w)(\d{1,5})\s+HK(?!\w)', raw, re.I)
     for num in hk_spaced:
-        t = f"{num}.HK"
+        padded = str(int(num)).zfill(4)   # e.g. "300" → "0300"
+        t = f"{padded}.HK"
         if t not in found:
             found.append(t)
 
@@ -704,14 +715,21 @@ def _extract_tickers(text: str,
 
     # Known name→ticker map
     name_map = {
+        # ── US majors ───────────────────────────────────────────────────────
         "tesla": "TSLA", "apple": "AAPL", "nvidia": "NVDA",
         "microsoft": "MSFT", "google": "GOOGL", "alphabet": "GOOGL",
         "amazon": "AMZN", "meta": "META", "netflix": "NFLX",
         "berkshire": "BRK-B", "jpmorgan": "JPM", "goldman": "GS",
+        "visa": "V", "mastercard": "MA", "unitedhealth": "UNH",
+        "eli lilly": "LLY", "broadcom": "AVGO", "amd": "AMD",
+        "intel": "INTC", "qualcomm": "QCOM", "arm": "ARM",
+        "palantir": "PLTR", "snowflake": "SNOW", "salesforce": "CRM",
         "特斯拉": "TSLA", "苹果": "AAPL", "微软": "MSFT",
         "谷歌": "GOOGL", "亚马逊": "AMZN", "英伟达": "NVDA",
+        # ── HK / China tickers (use zero-padded 4-digit format) ─────────────
         "tencent": "0700.HK", "腾讯": "0700.HK",
         "alibaba": "BABA", "阿里": "BABA", "阿里巴巴": "BABA",
+        "alibaba hk": "9988.HK", "阿里香港": "9988.HK",
         "meituan": "3690.HK", "美团": "3690.HK",
         "byd": "1211.HK", "比亚迪": "1211.HK",
         "li auto": "2015.HK", "理想汽车": "2015.HK", "理想": "2015.HK",
@@ -726,11 +744,33 @@ def _extract_tickers(text: str,
         "kuaishou": "1024.HK", "快手": "1024.HK",
         "cnooc": "0883.HK", "中海油": "0883.HK",
         "petrochina": "0857.HK", "中石油": "0857.HK",
+        "minth": "0300.HK", "minth group": "0300.HK", "敏实": "0300.HK",
+        "aia": "1299.HK", "友邦": "1299.HK", "aia group": "1299.HK",
+        "sun hung kai": "0016.HK", "新鸿基": "0016.HK",
+        "henderson land": "0012.HK", "恒基地产": "0012.HK",
+        "ck hutchison": "0001.HK", "长和": "0001.HK",
+        "hang seng bank": "0011.HK", "恒生银行": "0011.HK",
+        "boc hong kong": "2388.HK", "中银香港": "2388.HK",
+        "galaxy entertainment": "0027.HK", "银河娱乐": "0027.HK",
+        "sands china": "1928.HK", "金沙中国": "1928.HK",
+        "wuxi biologics": "2269.HK", "药明生物": "2269.HK",
+        "baidu": "9888.HK", "百度": "9888.HK",
+        "jd": "9618.HK", "京东": "9618.HK",
+        "trip.com": "9961.HK", "携程": "9961.HK",
+        "china resources beer": "0291.HK", "华润啤酒": "0291.HK",
+        # ── Japan ───────────────────────────────────────────────────────────
         "toyota": "7203.T", "丰田": "7203.T",
         "sony": "6758.T", "索尼": "6758.T",
         "softbank": "9984.T", "软银": "9984.T",
         "keyence": "6861.T",
+        "mufg": "8306.T", "mitsubishi ufj": "8306.T",
+        "nintendo": "7974.T", "任天堂": "7974.T",
+        "fast retailing": "9983.T", "uniqlo": "9983.T",
+        # ── Korea ───────────────────────────────────────────────────────────
         "samsung": "005930.KS", "三星": "005930.KS",
+        "sk hynix": "000660.KS", "hyundai": "005380.KS",
+        # ── Taiwan ──────────────────────────────────────────────────────────
+        "tsmc": "2330.TW", "台积电": "2330.TW", "台積電": "2330.TW",
     }
     lower = text.lower()
     for name, ticker in name_map.items():

@@ -315,51 +315,82 @@ _NUMERIC_TICKER_RE = _re.compile(
     _re.IGNORECASE,
 )
 
+# Detect standard US/global alpha tickers (2-5 uppercase letters).
+# Exclude common non-ticker abbreviations so "AI" or "HK" alone don't trigger.
+_NON_TICKER_WORDS = {
+    "AI", "US", "UK", "HK", "EU", "PE", "EV", "IPO", "ETF", "GDP", "CPI",
+    "FED", "EPS", "DCF", "FCF", "ROE", "ROA", "QE", "FX", "VC", "CF",
+    "TV", "HI", "LO", "MA", "NA", "OK", "OR", "BY", "AT", "TO", "IN",
+    "IS", "IT", "MY", "GO", "NO", "SO", "DO", "BE",
+}
+_US_TICKER_RE = _re.compile(r'\b([A-Z]{2,5})\b')
+
 
 def _has_numeric_ticker(text: str) -> bool:
     return bool(_NUMERIC_TICKER_RE.search(text))
 
 
+def _has_alpha_ticker(text: str) -> bool:
+    """Return True if the query contains what looks like a stock ticker symbol."""
+    for m in _US_TICKER_RE.finditer(text):
+        word = m.group(1)
+        if word not in _NON_TICKER_WORDS:
+            return True
+    return False
+
+
 def _detect_depth_hint(text: str) -> int:
     """
     Fast client-side depth heuristic (runs in microseconds, no API call).
-    Returns 1 or 2 to tell the CIO it can skip sub-agents, or 0 meaning
+    Returns 1, 2, 4 to tell the CIO a depth level, or 0 meaning
     'let the CIO decide via its own depth-level assessment'.
 
-    CRITICAL RULE: queries containing numeric exchange tickers (e.g. '3690 HK',
-    '8306 T') must never be Level 1.  The CIO's training data frequently
-    misidentifies Asian numeric codes — CompanyAgent must resolve them.
+    KEY RULES:
+    • Queries containing ANY stock ticker (numeric or alpha) → minimum Level 2.
+      The CIO's training data is months/years stale — live data is required.
+    • "comprehensive/deep/analysis" keywords → Level 4.
+    • Level 1 is ONLY for pure concept questions (no ticker, no company name).
     """
     t = text.lower().strip()
     words = t.split()
     wc = len(words)
 
-    # ── Guard: numeric tickers always need at least CompanyAgent ──────────
-    # "hows 3690 HK" has 3 words but 3690.HK=Meituan, not Geely.
-    # Without CompanyAgent the CIO guesses wrong. Minimum Level 2.
+    deep_kw = ("analyz", "analysis", "research", "deep dive", "comprehensive",
+               "detailed", "全面", "详细", "深度", "research note", "thesis",
+               "should i invest", "worth investing", "值得投资", "帮我写",
+               "full analysis", "in-depth", "indepth")
+
+    # ── Deep/comprehensive keywords → Level 4 (always, regardless of length) ─
+    if any(k in t for k in deep_kw):
+        return 4
+
+    # ── Guard: numeric exchange tickers must call CompanyAgent (never L1) ──
     if _has_numeric_ticker(text):
         return 2
 
-    # Explicit fast-path keywords override word-count rules
+    # ── Guard: alpha tickers (NVDA, TSLA, AAPL…) also need live data ────────
+    # "hows NVDA", "TSLA price", "what's AAPL doing" → live CompanyAgent call.
+    if _has_alpha_ticker(text):
+        return 2
+
+    # ── Explicit fast-path: user explicitly wants a one-liner ─────────────────
     if any(w in t for w in ["quick", "brief", "tldr", "tl;dr", "just tell",
                               "one sentence", "一句话", "简单说", "简短"]):
         return 1
 
-    # Pure concept question (≤ 10 words, no ticker context)
+    # ── Pure concept question: no ticker present, explains a term ─────────────
     concept_starts = ("what is", "what are", "what's a", "explain ", "define ",
                       "how does", "how do ", "what does", "什么是", "如何理解")
     if wc <= 10 and any(t.startswith(s) or s in t for s in concept_starts):
         return 1
 
-    # Very short query → Level 1 (no ticker = safe to use knowledge)
+    # ── Short query without ticker/company → Level 1 ─────────────────────────
+    # Only safe if NO ticker detected above (both guards already returned 2).
     if wc <= 4:
         return 1
 
-    # Short casual stock question → Level 2
-    deep_kw = ("analyz", "analysis", "research", "deep dive", "comprehensive",
-               "detailed", "全面", "详细", "深度", "research note", "thesis",
-               "should i invest", "worth investing", "值得投资", "帮我写")
-    if wc <= 10 and not any(k in t for k in deep_kw):
+    # ── Medium query → Level 2 ────────────────────────────────────────────────
+    if wc <= 10:
         return 2
 
     return 0  # let the CIO assess
