@@ -240,6 +240,8 @@ _SYSTEM_LINE_PREFIXES = (
     "query analysis report", "1. query type", "2. identified ticker",
     "3. user intent", "4. key context", "5. recommended", "6. priority",
     "7. suggested analysis",
+    "query analysis results",
+    "🧠 query understanding",
 )
 
 def _escape_currency(text: str) -> str:

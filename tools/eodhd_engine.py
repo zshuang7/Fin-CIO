@@ -66,6 +66,16 @@ _ANALYST_KEYWORDS = [
     "reiterates", "raises", "lowers", "maintains",
 ]
 
+# Banks / brokers for vote extraction (title-based heuristic)
+_BANK_NAMES = [
+    "Goldman Sachs", "Morgan Stanley", "JPMorgan", "JP Morgan", "J.P. Morgan",
+    "Citi", "Citigroup", "UBS", "Barclays", "Bank of America", "BofA",
+    "Wells Fargo", "Deutsche Bank", "Jefferies", "Needham", "Wedbush", "RBC",
+    "TD Cowen", "Piper Sandler", "Baird", "Bernstein", "HSBC", "Evercore",
+    "Oppenheimer", "Raymond James", "Truist", "DA Davidson", "D.A. Davidson",
+    "Mizuho", "Nomura", "Macquarie", "Credit Suisse", "BNP Paribas",
+]
+
 
 class EODHDEngine(BaseTool):
     """
@@ -90,6 +100,7 @@ class EODHDEngine(BaseTool):
         self.register(self.get_analyst_ratings)
         self.register(self.get_analyst_news)
         self.register(self.get_wall_street_breakdown)
+        self.register(self.get_wall_street_signals)
 
     # ── Ticker normalisation ──────────────────────────────────────────────────
 
@@ -364,3 +375,136 @@ class EODHDEngine(BaseTool):
             news_text,
             xv_note,
         ])
+
+    # ── NEW: Structured "Conviction Board" signals ────────────────────────────
+
+    @staticmethod
+    def _guess_stance(text: str) -> str:
+        """
+        Heuristic stance classifier from a headline/title/snippet.
+        Returns one of: 'bullish' | 'neutral' | 'bearish'
+        """
+        t = (text or "").lower()
+        bullish = ("buy", "strong buy", "overweight", "outperform", "upgrade",
+                   "raises target", "raise target", "initiates coverage")
+        bearish = ("sell", "strong sell", "underweight", "underperform", "downgrade",
+                   "cuts target", "cut target")
+        neutral = ("hold", "neutral", "market perform", "equal weight", "maintains")
+
+        if any(k in t for k in bearish):
+            return "bearish"
+        if any(k in t for k in bullish):
+            return "bullish"
+        if any(k in t for k in neutral):
+            return "neutral"
+        return "neutral"
+
+    @staticmethod
+    def _extract_bank(title: str) -> str | None:
+        if not title:
+            return None
+        tl = title.lower()
+        for b in _BANK_NAMES:
+            if b.lower() in tl:
+                # normalise a few aliases
+                if b in ("JP Morgan", "J.P. Morgan"):
+                    return "JPMorgan"
+                if b in ("DA Davidson", "D.A. Davidson"):
+                    return "D.A. Davidson"
+                if b == "BofA":
+                    return "Bank of America"
+                return b
+        return None
+
+    def get_wall_street_signals(self, ticker: str, limit: int = 25) -> str:
+        """
+        Return a JSON string used to build the "🗳️ Wall Street Conviction Board".
+
+        It combines:
+          - EODHD structured AnalystRatings (consensus + buy/hold/sell counts)
+          - EODHD News (last 180d) filtered for analyst/broker mentions
+
+        Output schema (JSON):
+          {
+            "ticker": "...",
+            "retrieved_at": "YYYY-MM-DD HH:MM",
+            "consensus": { "rating": ..., "target_price": ..., "distribution": {...} },
+            "bank_votes": [ { "bank": ..., "stance": ..., "date": ..., "source": ..., "title": ..., "url": ... }, ... ],
+            "vote_tally": { "bullish": N, "neutral": N, "bearish": N },
+            "news_max_date": "YYYY-MM-DD" | null
+          }
+        """
+        ticker = ticker.upper().strip()
+        eodhd_t = self._eodhd_ticker(ticker)
+
+        # Structured fundamentals for distribution counts
+        fundamentals = self._get(
+            f"fundamentals/{eodhd_t}",
+            {"filter": "AnalystRatings"},
+            cache_key=f"fundamentals_ratings_{eodhd_t}",
+        )
+        ar = (fundamentals or {}).get("AnalystRatings") if isinstance(fundamentals, dict) else {}
+        dist = {
+            "strong_buy": int(ar.get("StrongBuy") or 0),
+            "buy": int(ar.get("Buy") or 0),
+            "hold": int(ar.get("Hold") or 0),
+            "sell": int(ar.get("Sell") or 0),
+            "strong_sell": int(ar.get("StrongSell") or 0),
+        }
+        consensus = {
+            "rating": ar.get("Rating", None),
+            "target_price": ar.get("TargetPrice", None),
+            "distribution": dist,
+            "analyst_count": sum(dist.values()),
+        }
+
+        # News signals (use longer horizon to catch broker notes)
+        from_date = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
+        news = self._get(
+            "news",
+            {"s": eodhd_t, "limit": int(limit), "from": from_date},
+            cache_key=f"news_ws_{eodhd_t}_{from_date}_{limit}",
+        )
+
+        bank_latest: dict[str, dict] = {}
+        news_max_date: str | None = None
+        if isinstance(news, list):
+            for item in news[: int(limit)]:
+                title = item.get("title", "") or ""
+                bank = self._extract_bank(title)
+                if not bank:
+                    continue
+                date = (item.get("date") or "")[:10] or None
+                if date and (news_max_date is None or date > news_max_date):
+                    news_max_date = date
+                stance = self._guess_stance(title)
+                entry = {
+                    "bank": bank,
+                    "stance": stance,
+                    "date": date,
+                    "source": item.get("source", None),
+                    "title": title[:220],
+                    "url": item.get("url", None),
+                }
+                # Keep the most recent mention per bank
+                prev = bank_latest.get(bank)
+                if prev is None or (entry["date"] and prev.get("date") and entry["date"] > prev.get("date")):
+                    bank_latest[bank] = entry
+
+        votes = list(bank_latest.values())
+        tally = {"bullish": 0, "neutral": 0, "bearish": 0}
+        for v in votes:
+            s = v.get("stance", "neutral")
+            if s in tally:
+                tally[s] += 1
+
+        payload = {
+            "ticker": ticker,
+            "retrieved_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "consensus": consensus,
+            "bank_votes": sorted(votes, key=lambda x: (x.get("date") or ""), reverse=True)[:12],
+            "vote_tally": tally,
+            "news_max_date": news_max_date,
+            "confidence": "MEDIUM (headline-based bank extraction; verify primary notes for details)",
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2)
