@@ -1257,6 +1257,8 @@ if prompt:
                                 else str(resp2)
                             )
                             final = _clean_cio_output(str(content2))
+                        except Exception:
+                            _emit("__text__Consensus retry failed — returning best available answer.")
                     result_q.put(("ok", final or "[No response generated]"))
 
                 except Exception:
@@ -1278,13 +1280,16 @@ if prompt:
                                 "with vote + dated expert snippets.\n"
                                 "Do not include query analysis reports."
                             )
-                            resp2 = team.run(retry_query)
-                            content2 = (
-                                resp2.content
-                                if hasattr(resp2, "content") and resp2.content
-                                else str(resp2)
-                            )
-                            cleaned = _clean_cio_output(str(content2))
+                            try:
+                                resp2 = team.run(retry_query)
+                                content2 = (
+                                    resp2.content
+                                    if hasattr(resp2, "content") and resp2.content
+                                    else str(resp2)
+                                )
+                                cleaned = _clean_cio_output(str(content2))
+                            except Exception:
+                                _emit("__text__Consensus retry failed — returning best available answer.")
                         result_q.put(("ok", cleaned))
 
             except Exception as exc:
