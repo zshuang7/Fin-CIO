@@ -532,17 +532,14 @@ def _extract_key_risk(text: str) -> str | None:
     return None
 
 
-def _detect_depth_hint(text: str) -> int:
+def _detect_depth_hint(text: str) -> str:
     """
-    Fast client-side depth heuristic (runs in microseconds, no API call).
-    Returns 1-5 to tell the CIO a depth level, or 0 meaning
-    'let the CIO decide via its own depth-level assessment'.
+    Fast client-side depth heuristic.
+    Returns one of: 'fast', 'standard', 'master', 'deep_dive', or ''
+    (empty = let CIO decide).
 
-    KEY RULES:
-    • Any stock ticker → minimum Level 3 (need Wall Street + News sections).
-    • "comprehensive/deep/analysis" keywords → Level 4.
-    • "quick/brief" + ticker → Level 2 (fast but still data-backed).
-    • Level 1 is ONLY for pure concept questions (no ticker, no company name).
+    User can explicitly set level with "level=Fast", "level=Standard", etc.
+    Otherwise inferred from query signals.
     """
     t = text.lower().strip()
     words = t.split()
@@ -550,20 +547,36 @@ def _detect_depth_hint(text: str) -> int:
 
     has_ticker = _has_numeric_ticker(text) or _has_alpha_ticker(text)
 
+    # ── Explicit user-selected level (highest priority) ───────────────────────
+    import re as _lvl_re
+    lvl_match = _lvl_re.search(r'level\s*=\s*(fast|standard|master|deep\s*dive)', t)
+    if lvl_match:
+        raw = lvl_match.group(1).strip().replace(" ", "_")
+        return raw  # 'fast', 'standard', 'master', 'deep_dive'
+
     deep_kw = ("analyz", "analysis", "research", "deep dive", "comprehensive",
                "detailed", "全面", "详细", "深度", "research note", "thesis",
                "should i invest", "worth investing", "worth buying", "值得投资",
-               "帮我写", "full analysis", "in-depth", "indepth")
+               "帮我写", "full analysis", "in-depth", "indepth",
+               "fundamental teardown", "full capital structure", "unit economics")
 
-    quick_kw = ("quick", "brief", "tldr", "tl;dr", "just tell",
-                "one sentence", "一句话", "简单说", "简短", "price only",
-                "price?", "just the price")
+    fast_kw = ("quick", "brief", "tldr", "tl;dr", "just tell",
+               "one sentence", "一句话", "简单说", "简短", "price only",
+               "price?", "just the price", "5 minutes", "before a meeting")
 
-    # ── Deep/comprehensive keywords → Level 4 (always, regardless of length) ─
+    master_kw = ("institutional", "scenario", "how should.*cio",
+                 "3-5 year", "3 to 5 year", "long-term", "long term",
+                 "investment thesis", "investment committee")
+
+    # ── Deep Dive keywords ────────────────────────────────────────────────────
     if any(k in t for k in deep_kw):
-        return 4
+        return "deep_dive"
 
-    # ── Comparison queries must be Level 3+ (need 2 tickers + table) ──────────
+    # ── Master keywords ───────────────────────────────────────────────────────
+    if any(k in t for k in master_kw):
+        return "master"
+
+    # ── Comparison queries → Standard (need scorecard) ────────────────────────
     def _count_symbols_quick(raw: str) -> int:
         import re as __re
         syms: set[str] = set()
@@ -576,37 +589,35 @@ def _detect_depth_hint(text: str) -> int:
         return len(syms)
 
     if any(k in t for k in ("compare", "vs", "versus")) and _count_symbols_quick(text) >= 2:
-        return 3
+        return "standard"
 
-    # ── Ticker + "quick/brief" → Level 2 (fast but data-backed) ──────────────
-    if has_ticker and any(w in t for w in quick_kw):
-        return 2
+    # ── Ticker + "fast" keywords → Fast ───────────────────────────────────────
+    if has_ticker and any(w in t for w in fast_kw):
+        return "fast"
 
-    # ── Any ticker present → Level 3 (standard analysis with all sections) ───
-    # This ensures 🏛️ Institutional & Expert Consensus and 📰 Media News
-    # are ALWAYS produced for stock queries.
+    # ── Any ticker present → Standard (default for stock queries) ─────────────
     if has_ticker:
-        return 3
+        return "standard"
 
-    # ── Explicit fast-path: no ticker, user wants a one-liner ─────────────────
-    if any(w in t for w in quick_kw):
-        return 1
+    # ── No ticker: fast-path keywords → Fast ──────────────────────────────────
+    if any(w in t for w in fast_kw):
+        return "fast"
 
-    # ── Pure concept question: no ticker present, explains a term ─────────────
+    # ── Pure concept question ─────────────────────────────────────────────────
     concept_starts = ("what is", "what are", "what's a", "explain ", "define ",
                       "how does", "how do ", "what does", "什么是", "如何理解")
     if wc <= 10 and any(t.startswith(s) or s in t for s in concept_starts):
-        return 1
+        return "fast"
 
-    # ── Short query without ticker/company → Level 1 ─────────────────────────
+    # ── Short query without ticker → Fast ─────────────────────────────────────
     if wc <= 4:
-        return 1
+        return "fast"
 
-    # ── Medium query → Level 2 ────────────────────────────────────────────────
+    # ── Medium query → Standard ───────────────────────────────────────────────
     if wc <= 10:
-        return 2
+        return "standard"
 
-    return 0  # let the CIO assess
+    return ""  # let the CIO assess
 
 
 # ── Page config ────────────────────────────────────────────────────────────────
@@ -1340,12 +1351,12 @@ st.markdown("# FinAgent CIO")
 st.markdown("AI-Powered Investment Research Assistant")
 
 # ── Demo prompts row (one-click interview flow) ───────────────────────────────
-st.markdown("**Demo prompts (one click):**")
+st.markdown("**Try these** — or type `level=Fast`, `level=Standard`, `level=Master`, `level=Deep Dive` before any question:")
 demo_prompts = [
-    ("ORCL", "Comprehensive analysis for ORCL (professional)"),
-    ("NVDA", "How's NVDA? (fast snapshot)"),
-    ("9618.HK", "Comprehensive analysis for 9618 HK (JD.com Hong Kong)"),
-    ("BTCUSD", "Is BTCUSD bullish or bearish? include consensus + latest news"),
+    ("Fast: NVDA", "level=Fast | How's NVDA looking right now?"),
+    ("Standard: ORCL", "level=Standard | Analysis for ORCL"),
+    ("Master: UBER vs DASH", "level=Master | How should a CIO think about UBER vs DASH as gig-economy plays?"),
+    ("Deep Dive: 9618.HK", "level=Deep Dive | Full fundamental teardown for 9618 HK"),
 ]
 cols = st.columns(len(demo_prompts))
 for i, (label, q) in enumerate(demo_prompts):
@@ -1423,52 +1434,45 @@ if prompt:
     # anything else, preventing unnecessary sub-agent calls for simple queries.
     depth_hint = _detect_depth_hint(prompt)
     _numeric = _has_numeric_ticker(prompt)
-    _HINT_LABELS: dict[int, str] = {
-        1: (
-            "[FAST-PATH Level 1: answer INSTANTLY from knowledge. "
-            "ZERO tool calls. ≤100 words.]"
+    _numeric_warn = (
+        " NUMERIC TICKER — call CompanyAgent(ticker) FIRST. "
+        "NEVER guess company name. "
+        "Asian codes: 3690.HK=Meituan, 0700.HK=Tencent, 1211.HK=BYD, "
+        "2015.HK=Li Auto, 9988.HK=Alibaba, 9618.HK=JD, 9866.HK=NIO."
+        if _numeric else ""
+    )
+    _HINT_LABELS: dict[str, str] = {
+        "fast": (
+            f"[level=Fast]{_numeric_warn} "
+            "CIO quick take: 3-6 short paragraphs, minimal metrics, focus on big picture "
+            "and key drivers. Call CompanyAgent for live data if a ticker is present. "
+            "Skip WallStreetAgent/NewsAgent. Speak like a smart investor giving a hallway opinion."
         ),
-        2: (
-            "[FAST-PATH Level 2 — QUICK CHECK: "
-            "Call CompanyAgent for live price/basics. Skip WallStreetAgent and NewsAgent. "
-            "≤250 words. No ## section headers.]"
-            if not _numeric else
-            "[FAST-PATH Level 2 — NUMERIC TICKER QUICK CHECK: "
-            "Call CompanyAgent(ticker) FIRST. "
-            "NEVER guess company name from training data — "
-            "Asian numeric codes are frequently mis-identified "
-            "(e.g. 3690.HK=Meituan NOT Geely; 0175.HK=Geely; "
-            "1211.HK=BYD; 2015.HK=Li Auto; 0700.HK=Tencent; "
-            "9988.HK=Alibaba; 9866.HK=NIO; 9868.HK=XPeng; "
-            "0941.HK=China Mobile; 0005.HK=HSBC). "
-            "≤250 words. No ## section headers.]"
+        "standard": (
+            f"[level=Standard]{_numeric_warn} "
+            "MUST call CompanyAgent + WallStreetAgent + NewsAgent. "
+            "Narrative-driven: 3-5 sections with headings, 1 small table if helpful, "
+            "key metrics + qualitative context, clear bull vs bear, main risks. "
+            "MUST include 🏛️ Institutional & Expert Consensus (Wall Street banks) "
+            "AND 📰 Latest Media News & Sentiment (media) as SEPARATE sections. "
+            "End with a decision frame, not just a price target."
         ),
-        3: (
-            "[Level 3 — STANDARD ANALYSIS: "
-            "MUST call ALL of: CompanyAgent + WallStreetAgent + NewsAgent. "
-            "MUST include ## 🏛️ Institutional & Expert Consensus (Wall Street bank research) "
-            "AND ## 📰 Latest Media News & Sentiment (media headlines) as SEPARATE sections. "
-            "These are MANDATORY — do NOT skip them.]"
-            if not _numeric else
-            "[Level 3 — STANDARD ANALYSIS (NUMERIC TICKER): "
-            "Call CompanyAgent(ticker) FIRST to identify the company — "
-            "NEVER guess from training data. "
-            "Asian numeric codes: 3690.HK=Meituan, 0175.HK=Geely, "
-            "1211.HK=BYD, 2015.HK=Li Auto, 0700.HK=Tencent, "
-            "9988.HK=Alibaba, 9866.HK=NIO, 9868.HK=XPeng. "
-            "MUST call ALL of: CompanyAgent + WallStreetAgent + NewsAgent. "
-            "MUST include ## 🏛️ Institutional & Expert Consensus (Wall Street bank research) "
-            "AND ## 📰 Latest Media News & Sentiment (media headlines) as SEPARATE sections. "
-            "These are MANDATORY — do NOT skip them.]"
+        "master": (
+            f"[level=Master]{_numeric_warn} "
+            "MUST call ALL agents: MacroAgent + CompanyAgent + WallStreetAgent + NewsAgent. "
+            "As Standard PLUS explicit scenario thinking (base/bull/bear), "
+            "analogy to past cycles or peers, short decision framework. "
+            "MUST include 🏛️ and 📰 as separate sections. "
+            "Still narrative-driven — avoid 10+ metric spam. "
+            "Frame it as: 'If I were presenting this to an investment committee...'"
         ),
-        4: (
-            "[Level 4 — COMPREHENSIVE ANALYSIS: "
-            "MUST call ALL of: MacroAgent + CompanyAgent + WallStreetAgent + NewsAgent. "
-            "MUST include ALL sections: ## 📊 Fundamentals (TABLE), "
-            "## 🏛️ Institutional & Expert Consensus (Wall Street banks, SEPARATE), "
-            "## 📰 Latest Media News & Sentiment (media, SEPARATE), "
-            "## 🌐 Macro & Sector, ## 🎯 Recommendation, ## ⚠️ Key Risks & 🚀 Catalysts. "
-            "Be thorough and professional.]"
+        "deep_dive": (
+            f"[level=Deep Dive]{_numeric_warn} "
+            "MUST call ALL agents: MacroAgent + CompanyAgent + WallStreetAgent + NewsAgent. "
+            "Mini research note: more metrics, structured sections, but still narrative-driven. "
+            "MUST include 🏛️ and 📰, plus macro context, scenario analysis, "
+            "capital structure, unit economics if relevant. "
+            "Clear 'so what' at the end. Max depth and rigor."
         ),
     }
     hint_prefix = _HINT_LABELS.get(depth_hint, "")
@@ -1544,7 +1548,8 @@ if prompt:
                 team, _ = load_agents()
                 chunks: list[str] = []
                 stream_seen: set[str] = set()
-                requires_consensus = _has_numeric_ticker(prompt) or _has_alpha_ticker(prompt)
+                _is_fast = (depth_hint == "fast")
+                requires_consensus = (not _is_fast) and (_has_numeric_ticker(prompt) or _has_alpha_ticker(prompt))
                 requires_scorecard = any(k in (prompt or "").lower() for k in ("compare", "vs", "versus"))
 
                 # ── Streaming path ──────────────────────────────────────────
