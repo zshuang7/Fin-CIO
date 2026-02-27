@@ -49,14 +49,25 @@ class TavilyEngine(BaseTool):
         self.register(self.extract_institution_snippets)
 
     # ── Tier-1 entity & media filters (demo-quality evidence) ────────────────
+    # Wall Street banks / asset managers / research firms (NOT media outlets)
     _TIER1_INSTITUTIONS = (
         "Goldman Sachs", "Morgan Stanley", "JPMorgan", "JP Morgan", "J.P. Morgan",
         "UBS", "Citi", "Citigroup", "Bank of America", "BofA",
         "Barclays", "Deutsche Bank", "HSBC", "Wells Fargo",
         "BlackRock", "Blackstone", "KKR", "Apollo",
-        # Digital assets research (when symbol looks like crypto)
+        "Jefferies", "Needham", "Wedbush", "RBC", "TD Cowen",
+        "Piper Sandler", "Baird", "Bernstein", "Evercore",
+        "Oppenheimer", "Raymond James", "Truist", "D.A. Davidson",
+        "DA Davidson", "Mizuho", "Nomura", "Macquarie", "BNP Paribas",
+        # Digital assets research
         "Messari", "Glassnode", "Coinbase Research", "Galaxy Digital",
         "Binance Research", "Kaiko", "Nansen",
+    )
+    # Media outlets (separate from banks)
+    _TIER1_MEDIA = (
+        "Bloomberg", "Reuters", "Wall Street Journal", "WSJ",
+        "CNBC", "Yahoo Finance", "Financial Times", "FT",
+        "Barron's", "MarketWatch", "Seeking Alpha", "Motley Fool",
     )
     _TIER1_DOMAINS = (
         "reuters.com", "bloomberg.com", "wsj.com", "cnbc.com", "finance.yahoo.com",
@@ -65,6 +76,11 @@ class TavilyEngine(BaseTool):
         "citi.com", "bankofamerica.com", "barclays.com", "db.com", "hsbc.com",
         "blackrock.com",
         "messari.io", "glassnode.com", "coinbase.com", "galaxydigital.io",
+    )
+    _MEDIA_DOMAINS = (
+        "reuters.com", "bloomberg.com", "wsj.com", "cnbc.com",
+        "finance.yahoo.com", "ft.com", "barrons.com", "marketwatch.com",
+        "seekingalpha.com", "fool.com",
     )
 
     @staticmethod
@@ -77,6 +93,7 @@ class TavilyEngine(BaseTool):
 
     @classmethod
     def _match_institution(cls, text: str) -> str | None:
+        """Match Wall Street bank/research firm names (NOT media outlets)."""
         if not text:
             return None
         tl = text.lower()
@@ -84,8 +101,21 @@ class TavilyEngine(BaseTool):
             if name.lower() in tl:
                 if name in ("JP Morgan", "J.P. Morgan"):
                     return "JPMorgan"
-                if name == "BofA":
+                if name in ("BofA",):
                     return "Bank of America"
+                if name in ("DA Davidson",):
+                    return "D.A. Davidson"
+                return name
+        return None
+
+    @classmethod
+    def _match_media(cls, text: str) -> str | None:
+        """Match Tier-1 media outlet names."""
+        if not text:
+            return None
+        tl = text.lower()
+        for name in cls._TIER1_MEDIA:
+            if name.lower() in tl:
                 return name
         return None
 
@@ -96,63 +126,73 @@ class TavilyEngine(BaseTool):
             return False
         return any(h == d or h.endswith("." + d) for d in cls._TIER1_DOMAINS)
 
-    def extract_institution_snippets(self, symbol: str, days_back: int = 30, max_snippets: int = 3) -> str:
+    @classmethod
+    def _is_media_domain(cls, url: str) -> bool:
+        h = cls._host(url)
+        if not h:
+            return False
+        return any(h == d or h.endswith("." + d) for d in cls._MEDIA_DOMAINS)
+
+    @classmethod
+    def _classify_source(cls, title: str, content: str, url: str) -> str:
+        """Classify a search result as 'bank', 'media', or 'other'."""
+        if cls._match_institution(title) or cls._match_institution(content):
+            return "bank"
+        if cls._is_media_domain(url) or cls._match_media(title) or cls._match_media(content):
+            return "media"
+        return "other"
+
+    def extract_institution_snippets(self, symbol: str, days_back: int = 30, max_snippets: int = 6) -> str:
         """
-        Deterministically extract Tier-1 institutional evidence snippets for a symbol.
+        Deterministically extract evidence snippets for a symbol, SEPARATED into two categories:
+          - "bank": Wall Street analyst reports (Goldman, JPM, Morgan Stanley, etc.)
+          - "media": Tier-1 media coverage (Bloomberg, Reuters, WSJ, CNBC, Yahoo Finance, etc.)
+
         Returns JSON string:
           {
             "symbol": "...",
             "retrieved_at": "...",
             "window_days": 30,
-            "snippets": [ { "entity": "...", "date": "YYYY-MM-DD|Date unknown", "url": "...", "takeaway": "..." } ],
+            "bank_snippets": [ { "entity", "date", "url", "takeaway" } ],
+            "media_snippets": [ { "entity", "date", "url", "takeaway" } ],
             "warning": "..."?
           }
-
-        Rules:
-          - Only accept Tier-1 institutions (banks/asset managers/crypto research).
-          - Prefer Tier-1 domains when available.
-          - De-duplicate by entity + host.
-          - Each snippet includes entity + date (published_date if present).
         """
         from datetime import datetime
         sym = (symbol or "").upper().strip()
         retrieved_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+        empty_payload = lambda err: json.dumps(
+            {"symbol": sym, "retrieved_at": retrieved_at, "window_days": days_back,
+             "bank_snippets": [], "media_snippets": [], "error": str(err)},
+            ensure_ascii=False, indent=2,
+        )
         try:
             client = self._get_client()
         except Exception as e:
-            return json.dumps(
-                {"symbol": sym, "retrieved_at": retrieved_at, "window_days": days_back, "snippets": [], "error": str(e)},
-                ensure_ascii=False,
-                indent=2,
-            )
+            return empty_payload(e)
 
         year = datetime.now().year
         month = datetime.now().strftime("%b")
-        # One targeted query only (demo speed + quota)
         q = (
-            f"{sym} latest analyst report Goldman Sachs Morgan Stanley JPMorgan UBS Citi "
-            f"{month} {year} last {int(days_back)} days"
+            f"{sym} latest analyst report Goldman Sachs Morgan Stanley JPMorgan UBS "
+            f"Bloomberg Reuters WSJ CNBC {month} {year} last {int(days_back)} days"
         )
         try:
             resp = client.search(
                 _trim_query(q),
                 search_depth="advanced",
                 include_answer=False,
-                max_results=10,
+                max_results=15,
                 topic="finance",
             )
         except Exception as e:
-            return json.dumps(
-                {"symbol": sym, "retrieved_at": retrieved_at, "window_days": days_back, "snippets": [], "error": str(e)},
-                ensure_ascii=False,
-                indent=2,
-            )
+            return empty_payload(e)
 
         results = resp.get("results") or []
-        snippets: list[dict] = []
+        bank_snippets: list[dict] = []
+        media_snippets: list[dict] = []
         seen: set[tuple[str, str]] = set()
 
-        # Rank: Tier-1 domain first, then any result that includes a Tier-1 institution name
         def score(r: dict) -> int:
             url = r.get("url") or ""
             title = r.get("title") or ""
@@ -161,16 +201,35 @@ class TavilyEngine(BaseTool):
             if self._is_tier1_domain(url):
                 s += 3
             if self._match_institution(title) or self._match_institution(content):
+                s += 4
+            if self._match_media(title) or self._is_media_domain(url):
                 s += 2
-            if (r.get("published_date") or ""):
+            if r.get("published_date"):
                 s += 1
             return s
+
+        max_per_cat = max(int(max_snippets) // 2, 3)
 
         for r in sorted(results, key=score, reverse=True):
             url = (r.get("url") or "").strip()
             title = (r.get("title") or "").strip()
             content = (r.get("content") or "").strip()
-            entity = self._match_institution(title) or self._match_institution(content)
+            category = self._classify_source(title, content, url)
+
+            # Determine display entity name
+            if category == "bank":
+                entity = self._match_institution(title) or self._match_institution(content)
+            elif category == "media":
+                entity = self._match_media(title) or self._match_media(title)
+                if not entity:
+                    host = self._host(url)
+                    for d in self._MEDIA_DOMAINS:
+                        if host == d or host.endswith("." + d):
+                            entity = d.split(".")[0].title()
+                            break
+            else:
+                continue
+
             if not entity:
                 continue
 
@@ -186,26 +245,34 @@ class TavilyEngine(BaseTool):
             if not takeaway:
                 continue
 
-            snippets.append(
-                {
-                    "entity": entity,
-                    "date": date,
-                    "url": url,
-                    "takeaway": takeaway,
-                    "tier1_domain": bool(self._is_tier1_domain(url)),
-                }
-            )
-            if len(snippets) >= int(max_snippets):
+            snippet = {
+                "entity": entity,
+                "date": date,
+                "url": url,
+                "takeaway": takeaway,
+            }
+
+            if category == "bank" and len(bank_snippets) < max_per_cat:
+                bank_snippets.append(snippet)
+            elif category == "media" and len(media_snippets) < max_per_cat:
+                media_snippets.append(snippet)
+
+            if len(bank_snippets) >= max_per_cat and len(media_snippets) >= max_per_cat:
                 break
 
         payload: dict = {
             "symbol": sym,
             "retrieved_at": retrieved_at,
             "window_days": int(days_back),
-            "snippets": snippets,
+            "bank_snippets": bank_snippets,
+            "media_snippets": media_snippets,
         }
-        if not snippets:
-            payload["warning"] = "No Tier-1 institutional snippets found in this window. Avoid implying bank coverage."
+        if not bank_snippets and not media_snippets:
+            payload["warning"] = "No Tier-1 snippets found in this window."
+        elif not bank_snippets:
+            payload["warning"] = "No Wall Street bank snippets found — only media coverage available."
+        elif not media_snippets:
+            payload["warning"] = "No Tier-1 media snippets found — only bank research available."
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
     def _get_client(self):
