@@ -66,15 +66,17 @@ _ANALYST_KEYWORDS = [
     "reiterates", "raises", "lowers", "maintains",
 ]
 
-# Banks / brokers for vote extraction (title-based heuristic)
-_BANK_NAMES = [
-    "Goldman Sachs", "Morgan Stanley", "JPMorgan", "JP Morgan", "J.P. Morgan",
-    "Citi", "Citigroup", "UBS", "Barclays", "Bank of America", "BofA",
-    "Wells Fargo", "Deutsche Bank", "Jefferies", "Needham", "Wedbush", "RBC",
-    "TD Cowen", "Piper Sandler", "Baird", "Bernstein", "HSBC", "Evercore",
-    "Oppenheimer", "Raymond James", "Truist", "DA Davidson", "D.A. Davidson",
-    "Mizuho", "Nomura", "Macquarie", "Credit Suisse", "BNP Paribas",
+# Banks / brokers for vote extraction (tiered by influence)
+_BANK_NAMES_T1 = ["Goldman Sachs", "JPMorgan", "JP Morgan", "J.P. Morgan", "Morgan Stanley"]
+_BANK_NAMES_T2 = ["Bank of America", "BofA", "Citigroup", "Citi", "Barclays", "UBS"]
+_BANK_NAMES_T3 = [
+    "Centerview", "Evercore", "Lazard", "Jefferies", "Moelis",
+    "Needham", "Wedbush", "RBC", "TD Cowen", "Piper Sandler",
+    "Baird", "Bernstein", "Oppenheimer", "Raymond James", "Truist",
+    "DA Davidson", "D.A. Davidson", "Mizuho", "Nomura", "Macquarie",
+    "BNP Paribas", "Deutsche Bank", "HSBC", "Wells Fargo",
 ]
+_BANK_NAMES = _BANK_NAMES_T1 + _BANK_NAMES_T2 + _BANK_NAMES_T3
 
 
 class EODHDEngine(BaseTool):

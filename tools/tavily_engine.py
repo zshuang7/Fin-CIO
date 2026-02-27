@@ -49,38 +49,57 @@ class TavilyEngine(BaseTool):
         self.register(self.extract_institution_snippets)
 
     # ── Tier-1 entity & media filters (demo-quality evidence) ────────────────
-    # Wall Street banks / asset managers / research firms (NOT media outlets)
-    _TIER1_INSTITUTIONS = (
-        "Goldman Sachs", "Morgan Stanley", "JPMorgan", "JP Morgan", "J.P. Morgan",
-        "UBS", "Citi", "Citigroup", "Bank of America", "BofA",
-        "Barclays", "Deutsche Bank", "HSBC", "Wells Fargo",
+    # ── Wall Street Banking Institutions (tiered by prestige & market influence) ──
+    # Tier 1: The "Big Three" — market leaders, highest evidence weight
+    _TIER1_BANKS = (
+        "Goldman Sachs", "JPMorgan", "JP Morgan", "J.P. Morgan", "Morgan Stanley",
+    )
+    # Tier 2: Bulge Bracket & Power Players
+    _TIER2_BANKS = (
+        "Bank of America", "BofA", "Citigroup", "Citi", "Barclays", "UBS",
+    )
+    # Tier 3: Elite Boutiques & Significant Players
+    _TIER3_BANKS = (
+        "Centerview", "Evercore", "Lazard", "Jefferies", "Moelis",
+        "Needham", "Wedbush", "RBC", "TD Cowen", "Piper Sandler",
+        "Baird", "Bernstein", "Oppenheimer", "Raymond James", "Truist",
+        "D.A. Davidson", "DA Davidson", "Mizuho", "Nomura", "Macquarie",
+        "BNP Paribas", "Deutsche Bank", "HSBC", "Wells Fargo",
         "BlackRock", "Blackstone", "KKR", "Apollo",
-        "Jefferies", "Needham", "Wedbush", "RBC", "TD Cowen",
-        "Piper Sandler", "Baird", "Bernstein", "Evercore",
-        "Oppenheimer", "Raymond James", "Truist", "D.A. Davidson",
-        "DA Davidson", "Mizuho", "Nomura", "Macquarie", "BNP Paribas",
         # Digital assets research
         "Messari", "Glassnode", "Coinbase Research", "Galaxy Digital",
         "Binance Research", "Kaiko", "Nansen",
     )
-    # Media outlets (separate from banks)
-    _TIER1_MEDIA = (
-        "Bloomberg", "Reuters", "Wall Street Journal", "WSJ",
-        "CNBC", "Yahoo Finance", "Financial Times", "FT",
-        "Barron's", "MarketWatch", "Seeking Alpha", "Motley Fool",
+    _TIER1_INSTITUTIONS = _TIER1_BANKS + _TIER2_BANKS + _TIER3_BANKS
+
+    # ── News Channels & Financial Media (tiered by agenda-setting power) ──
+    # Tier 1: The "Financial Bible" — agenda setters
+    _TIER1_MEDIA_TOP = (
+        "Bloomberg", "Wall Street Journal", "WSJ", "Financial Times", "FT",
     )
+    # Tier 2: Real-Time Market Movers
+    _TIER2_MEDIA = (
+        "CNBC", "Reuters", "The Economist",
+    )
+    # Tier 3: Specialized Insights & Retail Focus
+    _TIER3_MEDIA = (
+        "Barron's", "MarketWatch", "Axios", "Seeking Alpha",
+        "Yahoo Finance", "Motley Fool", "Investopedia",
+    )
+    _TIER1_MEDIA = _TIER1_MEDIA_TOP + _TIER2_MEDIA + _TIER3_MEDIA
+
     _TIER1_DOMAINS = (
-        "reuters.com", "bloomberg.com", "wsj.com", "cnbc.com", "finance.yahoo.com",
-        "ft.com", "markets.ft.com",
         "goldmansachs.com", "morganstanley.com", "jpmorgan.com", "ubs.com",
         "citi.com", "bankofamerica.com", "barclays.com", "db.com", "hsbc.com",
-        "blackrock.com",
+        "blackrock.com", "jefferies.com", "evercore.com",
+        "reuters.com", "bloomberg.com", "wsj.com", "cnbc.com", "finance.yahoo.com",
+        "ft.com", "markets.ft.com",
         "messari.io", "glassnode.com", "coinbase.com", "galaxydigital.io",
     )
     _MEDIA_DOMAINS = (
         "reuters.com", "bloomberg.com", "wsj.com", "cnbc.com",
         "finance.yahoo.com", "ft.com", "barrons.com", "marketwatch.com",
-        "seekingalpha.com", "fool.com",
+        "seekingalpha.com", "fool.com", "axios.com", "economist.com",
     )
 
     @staticmethod
@@ -109,8 +128,38 @@ class TavilyEngine(BaseTool):
         return None
 
     @classmethod
+    def _bank_tier(cls, name: str) -> int:
+        """Return tier (1=highest prestige, 3=lowest). 0 if not found."""
+        nl = (name or "").lower()
+        for n in cls._TIER1_BANKS:
+            if n.lower() in nl or nl in n.lower():
+                return 1
+        for n in cls._TIER2_BANKS:
+            if n.lower() in nl or nl in n.lower():
+                return 2
+        for n in cls._TIER3_BANKS:
+            if n.lower() in nl or nl in n.lower():
+                return 3
+        return 0
+
+    @classmethod
+    def _media_tier(cls, name: str) -> int:
+        """Return tier (1=highest influence, 3=lowest). 0 if not found."""
+        nl = (name or "").lower()
+        for n in cls._TIER1_MEDIA_TOP:
+            if n.lower() in nl or nl in n.lower():
+                return 1
+        for n in cls._TIER2_MEDIA:
+            if n.lower() in nl or nl in n.lower():
+                return 2
+        for n in cls._TIER3_MEDIA:
+            if n.lower() in nl or nl in n.lower():
+                return 3
+        return 0
+
+    @classmethod
     def _match_media(cls, text: str) -> str | None:
-        """Match Tier-1 media outlet names."""
+        """Match media outlet names."""
         if not text:
             return None
         tl = text.lower()
@@ -198,11 +247,18 @@ class TavilyEngine(BaseTool):
             title = r.get("title") or ""
             content = r.get("content") or ""
             s = 0
+            # Tier-weighted scoring: Tier 1 banks > Tier 2 > Tier 3
+            bank_name = self._match_institution(title) or self._match_institution(content)
+            if bank_name:
+                tier = self._bank_tier(bank_name)
+                s += {1: 10, 2: 7, 3: 5}.get(tier, 4)
+            media_name = self._match_media(title) or self._match_media(
+                self._host(url).split(".")[0] if self._host(url) else ""
+            )
+            if media_name:
+                tier = self._media_tier(media_name)
+                s += {1: 6, 2: 4, 3: 2}.get(tier, 1)
             if self._is_tier1_domain(url):
-                s += 3
-            if self._match_institution(title) or self._match_institution(content):
-                s += 4
-            if self._match_media(title) or self._is_media_domain(url):
                 s += 2
             if r.get("published_date"):
                 s += 1
@@ -216,9 +272,9 @@ class TavilyEngine(BaseTool):
             content = (r.get("content") or "").strip()
             category = self._classify_source(title, content, url)
 
-            # Determine display entity name
             if category == "bank":
                 entity = self._match_institution(title) or self._match_institution(content)
+                tier = self._bank_tier(entity) if entity else 0
             elif category == "media":
                 entity = self._match_media(title) or self._match_media(title)
                 if not entity:
@@ -227,6 +283,7 @@ class TavilyEngine(BaseTool):
                         if host == d or host.endswith("." + d):
                             entity = d.split(".")[0].title()
                             break
+                tier = self._media_tier(entity) if entity else 0
             else:
                 continue
 
@@ -250,6 +307,7 @@ class TavilyEngine(BaseTool):
                 "date": date,
                 "url": url,
                 "takeaway": takeaway,
+                "tier": tier,
             }
 
             if category == "bank" and len(bank_snippets) < max_per_cat:
@@ -259,6 +317,10 @@ class TavilyEngine(BaseTool):
 
             if len(bank_snippets) >= max_per_cat and len(media_snippets) >= max_per_cat:
                 break
+
+        # Sort each list by tier (lower tier number = higher prestige = first)
+        bank_snippets.sort(key=lambda s: s.get("tier", 9))
+        media_snippets.sort(key=lambda s: s.get("tier", 9))
 
         payload: dict = {
             "symbol": sym,
