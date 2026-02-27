@@ -318,11 +318,146 @@ class FmpEngine(BaseTool):
         filled = max(0, min(width, filled))
         return ("█" * filled) + ("░" * (width - filled))
 
+    # ── Analytical fallback: derive consensus from yfinance + EODHD when FMP is empty ──
+
+    def _derive_consensus_from_yfinance(self, symbol: str) -> dict | None:
+        """Try yfinance recommendationKey + targetMeanPrice as a rough consensus proxy."""
+        try:
+            import yfinance as yf
+            info = yf.Ticker(symbol).info or {}
+            rec = (info.get("recommendationKey") or "").lower()
+            n_analysts = info.get("numberOfAnalystOpinions") or 0
+            if not rec or rec == "none":
+                return None
+            mapping = {
+                "strong_buy": {"bullish_pct": 90, "neutral_pct": 8, "bearish_pct": 2},
+                "buy":        {"bullish_pct": 75, "neutral_pct": 20, "bearish_pct": 5},
+                "hold":       {"bullish_pct": 25, "neutral_pct": 55, "bearish_pct": 20},
+                "sell":       {"bullish_pct": 5, "neutral_pct": 20, "bearish_pct": 75},
+                "strong_sell":{"bullish_pct": 2, "neutral_pct": 8, "bearish_pct": 90},
+            }
+            vote = mapping.get(rec, {"bullish_pct": 33, "neutral_pct": 34, "bearish_pct": 33})
+            vote["total_votes"] = n_analysts or None
+            vote["bucket_counts"] = None
+            return {
+                "vote": vote,
+                "market_sentiment": self._market_sentiment_label(vote),
+                "source": f"yfinance (recommendation: {rec.upper()}, ~{n_analysts} analysts)",
+                "approximate": True,
+            }
+        except Exception as exc:
+            logger.debug("[fmp_engine] yfinance fallback failed for %s: %s", symbol, exc)
+            return None
+
+    def _derive_consensus_from_eodhd(self, symbol: str) -> dict | None:
+        """Try EODHD AnalystRatings distribution as a consensus proxy."""
+        try:
+            from tools.eodhd_engine import EODHDEngine
+            eng = EODHDEngine()
+            raw = eng.get_wall_street_signals(symbol)
+            data = json.loads(raw) if raw else {}
+            consensus = data.get("consensus") or {}
+            dist = consensus.get("distribution") or {}
+            total = consensus.get("analyst_count") or 0
+            if total <= 0:
+                return None
+            bull = (dist.get("strong_buy") or 0) + (dist.get("buy") or 0)
+            neu = dist.get("hold") or 0
+            bear = (dist.get("sell") or 0) + (dist.get("strong_sell") or 0)
+            vote = {
+                "bullish_pct": round(100 * bull / total, 1),
+                "neutral_pct": round(100 * neu / total, 1),
+                "bearish_pct": round(100 * bear / total, 1),
+                "total_votes": total,
+                "bucket_counts": {"bullish": bull, "neutral": neu, "bearish": bear},
+            }
+            return {
+                "vote": vote,
+                "market_sentiment": self._market_sentiment_label(vote),
+                "source": f"EODHD AnalystRatings ({total} analysts)",
+                "approximate": False,
+            }
+        except Exception as exc:
+            logger.debug("[fmp_engine] EODHD fallback failed for %s: %s", symbol, exc)
+            return None
+
+    def _derive_consensus_from_news_sentiment(self, symbol: str) -> dict | None:
+        """
+        Last-resort analytical method: fetch recent headlines from multiple
+        news APIs and classify sentiment to build an approximate consensus.
+        """
+        try:
+            positive = neutral = negative = 0
+            sources_used: list[str] = []
+
+            # Try Polygon
+            try:
+                from tools.polygon_engine import PolygonEngine
+                poly = PolygonEngine()
+                raw = poly.get_media_news(symbol, limit=15, days=30)
+                items = json.loads(raw).get("items") or []
+                if items:
+                    sources_used.append("Polygon")
+                    for it in items:
+                        t = ((it.get("title") or "") + " " + (it.get("summary") or "")).lower()
+                        if any(w in t for w in ("upgrade", "buy", "outperform", "bullish", "beat", "strong", "surge", "rally")):
+                            positive += 1
+                        elif any(w in t for w in ("downgrade", "sell", "underperform", "bearish", "miss", "decline", "crash", "cut")):
+                            negative += 1
+                        else:
+                            neutral += 1
+            except Exception:
+                pass
+
+            # Try NewsData.io
+            try:
+                from tools.newsdata_engine import NewsDataEngine
+                nd = NewsDataEngine()
+                raw = nd.get_latest_news(f"{symbol} stock", size=15, days=30)
+                items = json.loads(raw).get("items") or []
+                if items:
+                    sources_used.append("NewsData.io")
+                    for it in items:
+                        t = ((it.get("title") or "") + " " + (it.get("summary") or "")).lower()
+                        if any(w in t for w in ("upgrade", "buy", "outperform", "bullish", "beat", "strong", "surge", "rally")):
+                            positive += 1
+                        elif any(w in t for w in ("downgrade", "sell", "underperform", "bearish", "miss", "decline", "crash", "cut")):
+                            negative += 1
+                        else:
+                            neutral += 1
+            except Exception:
+                pass
+
+            total = positive + neutral + negative
+            if total < 3:
+                return None
+            vote = {
+                "bullish_pct": round(100 * positive / total, 1),
+                "neutral_pct": round(100 * neutral / total, 1),
+                "bearish_pct": round(100 * negative / total, 1),
+                "total_votes": total,
+                "bucket_counts": {"bullish": positive, "neutral": neutral, "bearish": negative},
+            }
+            return {
+                "vote": vote,
+                "market_sentiment": self._market_sentiment_label(vote),
+                "source": f"News sentiment analysis ({total} headlines from {', '.join(sources_used)})",
+                "approximate": True,
+            }
+        except Exception as exc:
+            logger.debug("[fmp_engine] news-sentiment fallback failed for %s: %s", symbol, exc)
+            return None
+
     def format_consensus_vote(self, symbol: str) -> str:
         """
         Returns a pre-formatted, in-context vote tally (text bars) for the
         Institutional & Expert Consensus module.
-        This avoids the model fabricating percentages.
+
+        CASCADE LOGIC (tries each source until one returns data):
+          1. FMP grades-consensus (direct analyst vote)
+          2. EODHD AnalystRatings (structured distribution)
+          3. yfinance recommendationKey (approximate mapping)
+          4. News headline sentiment analysis (analytical semi-consensus)
         """
         sym = (symbol or "").upper().strip()
         raw = self.get_consensus_data(sym)
@@ -338,8 +473,30 @@ class FmpEngine(BaseTool):
         total_votes = vote.get("total_votes")
         sentiment = data.get("market_sentiment", "N/A") if isinstance(data, dict) else "N/A"
         retrieved_at = data.get("retrieved_at") if isinstance(data, dict) else None
+        src = data.get("source", "FMP") if isinstance(data, dict) else "FMP"
+        is_approximate = False
 
-        # Normalise for display
+        # ── CASCADE: if FMP returned empty vote, try alternatives ──────────
+        if b is None or (total_votes is not None and total_votes == 0):
+            for fallback_name, fallback_fn in [
+                ("EODHD", self._derive_consensus_from_eodhd),
+                ("yfinance", self._derive_consensus_from_yfinance),
+                ("News Sentiment", self._derive_consensus_from_news_sentiment),
+            ]:
+                logger.debug("[fmp_engine] FMP empty for %s, trying %s fallback", sym, fallback_name)
+                result = fallback_fn(sym)
+                if result and result.get("vote"):
+                    fb_vote = result["vote"]
+                    if fb_vote.get("bullish_pct") is not None:
+                        b = fb_vote["bullish_pct"]
+                        n = fb_vote["neutral_pct"]
+                        r = fb_vote["bearish_pct"]
+                        total_votes = fb_vote.get("total_votes")
+                        sentiment = result.get("market_sentiment", "N/A")
+                        src = result["source"]
+                        is_approximate = result.get("approximate", False)
+                        break
+
         def fmt(x):
             return "N/A" if x is None else f"{float(x):.1f}%"
 
@@ -355,17 +512,15 @@ class FmpEngine(BaseTool):
                 f"🐻 Bearish  {self._bar(float(r))}  {fmt(r)}",
             ]
         else:
-            lines.append("Vote Tally: N/A (no analyst vote distribution returned)")
+            lines.append("Vote Tally: N/A (no data from any source)")
 
-        if isinstance(total_votes, int):
+        if isinstance(total_votes, int) and total_votes > 0:
             lines.append(f"Total analyst votes: {total_votes}")
 
-        # Coverage sanity note (common for non-US tickers)
-        if total_votes == 0 and sym.endswith((".HK", ".T", ".L")):
-            lines.append("Coverage note: consensus vote may be unavailable for this non‑US ticker via FMP.")
+        if is_approximate:
+            lines.append("⚠️ Note: This is an approximate consensus derived from alternative data sources.")
 
         lines.append(f"Market Sentiment: {sentiment}")
-        src = data.get("source", "FMP") if isinstance(data, dict) else "FMP"
         if retrieved_at:
             lines.append(f"Source: {src} | Retrieved: {retrieved_at}")
         else:

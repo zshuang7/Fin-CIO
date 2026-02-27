@@ -1,20 +1,25 @@
 """
 agents/team_config.py — Multi-agent CIO team.
 
-Data-source matrix:
+Data-source matrix (with CASCADE fallback order):
 ─────────────────────────────────────────────────────────────────────
-Agent           Tools
+Agent           Tools (in cascade/fallback order)
 ─────────────────────────────────────────────────────────────────────
 QueryAnalyst    TavilyEngine          ← intent classification
-MacroAgent      TavilyEngine          ← macro / sector web search
-                AlphaVantageEngine    ← GDP, CPI, FedRate macro data
-CompanyAgent    FinanceEngine         ← yfinance price/financials
-                FinnhubEngine         ← analyst ratings, earnings, insiders
-                AlphaVantageEngine    ← EPS history, overview, EV/EBITDA
-NewsAgent       TavilyEngine          ← grounded news search
-                NewsEngine            ← DuckDuckGo (fallback)
-                FinnhubEngine         ← company news (reliable non-US)
-                AlphaVantageEngine    ← AI-scored news sentiment
+MacroAgent      AlphaVantageEngine    ← GDP, CPI, FedRate (primary)
+                TavilyEngine          ← macro web search (fallback)
+CompanyAgent    FinanceEngine         ← yfinance price/financials (primary)
+                FinnhubEngine         ← analyst ratings, earnings (US only)
+                AlphaVantageEngine    ← EPS, overview (fallback)
+                EODHDEngine           ← international fundamentals (fallback)
+WallStreetAgent FmpEngine             ← consensus vote (primary)
+                EODHDEngine           ← bank signals (fallback 1)
+                TavilyEngine          ← institution snippets (fallback 2)
+NewsAgent       PolygonEngine         ← Tier-1 US news (primary)
+                NewsDataEngine        ← global news (fallback 1)
+                TavilyEngine          ← web search (fallback 2)
+                FinnhubEngine         ← company news (fallback 3)
+                NewsEngine            ← DuckDuckGo (last resort)
 ReportManager   ReportEngine          ← Excel + PDF (only on user request)
 ─────────────────────────────────────────────────────────────────────
 
@@ -114,10 +119,21 @@ macro_agent = Agent(
     instructions=[
         "You are a senior macroeconomic analyst. Be CONCISE — 150-200 words max.",
         "",
-        "Call at most 2 tools:",
-        "  US stocks / current:  get_macro_indicator('GDP') + get_macro_indicator('FED_RATE')",
-        "  Non-US / sectors:     finance_search('<country or sector> macro outlook 2026')",
-        "  Historical queries:   web_search('<topic> <year> economic conditions')",
+        "Use CASCADE logic — if one source fails, switch to the next:",
+        "",
+        "  US macro data:",
+        "    A) get_macro_indicator('GDP') + get_macro_indicator('FED_RATE') — Alpha Vantage",
+        "    B) If Alpha Vantage returns error/empty → finance_search('US GDP growth rate 2026') — Tavily",
+        "",
+        "  Non-US / sector macro:",
+        "    A) finance_search('<country or sector> macro outlook 2026') — Tavily",
+        "    B) If Tavily returns sparse → web_search('<country> economy 2026 growth inflation') — broader search",
+        "",
+        "  Historical queries:",
+        "    A) web_search('<topic> <year> economic conditions') — Tavily web search",
+        "",
+        "  NEVER return empty macro context. If structured APIs fail, Tavily web search",
+        "  can always provide macro backdrop from news articles and reports.",
         "",
         "Output format (strict, no padding):",
         "  ## Macro Context",
@@ -135,19 +151,33 @@ company_agent = Agent(
     name="CompanyAgent",
     role="Fundamental Research Analyst",
     model=_chat_model(),
-    tools=[FinanceEngine(), FinnhubEngine(), AlphaVantageEngine()],
+    tools=[FinanceEngine(), FinnhubEngine(), AlphaVantageEngine(), EODHDEngine()],
     instructions=[
         "You are a fundamental equity research analyst. Be CONCISE — 200-250 words max.",
         "Only run for STOCK_ANALYSIS queries.",
         "",
-        "Call EXACTLY these 4 tools in order — no more:",
-        "  1. get_financial_summary(ticker)   — current price, P/E, market cap (yfinance)",
-        "  2. get_income_statement(ticker)    — 3-year revenue & profit trend (yfinance)",
-        "  3. get_analyst_ratings(ticker)     — analyst Buy/Hold/Sell consensus (Finnhub, US only)",
-        "  4. get_earnings_surprise(ticker)   — last 4 quarters EPS beat/miss (Finnhub, US only)",
+        "IMPORTANT: Use CASCADE logic — if one source fails, try the next!",
         "",
-        "Note: Finnhub returns a skip message for non-US tickers (e.g. 8306.T, HSBA.L) — expected.",
-        "For non-US tickers, tools 3 & 4 will gracefully return N/A — that is fine.",
+        "Step 1 — Price & Fundamentals (try in order until data is obtained):",
+        "  A) get_financial_summary(ticker)   — yfinance (works for most tickers)",
+        "  B) If yfinance returns 'Error' or all N/A → get_company_overview(ticker) (Alpha Vantage)",
+        "  C) If still empty → get_analyst_ratings(ticker) via EODHD (works for international tickers too)",
+        "",
+        "Step 2 — Financial Trends:",
+        "  A) get_income_statement(ticker)    — yfinance 3-year revenue & profit trend",
+        "  B) If empty → get_eps_history(ticker) via Alpha Vantage for earnings trend",
+        "",
+        "Step 3 — Analyst Consensus (try in order):",
+        "  A) get_analyst_ratings(ticker)     — Finnhub (US stocks only)",
+        "  B) If Finnhub skips (non-US) → get_analyst_ratings(ticker) via EODHD",
+        "  C) If still empty → use yfinance 'recommendationKey' from Step 1 summary",
+        "",
+        "Step 4 — Earnings Pattern:",
+        "  A) get_earnings_surprise(ticker)   — Finnhub (US only)",
+        "  B) If Finnhub skips → get_eps_history(ticker) via Alpha Vantage",
+        "",
+        "NEVER report 'data unavailable' without trying at least 2 alternative sources.",
+        "If a source fails silently, move to the next — don't waste output space on error messages.",
         "",
         "Output format (strict):",
         "  ## Fundamental Analysis",
@@ -173,11 +203,21 @@ news_agent = Agent(
     instructions=[
         "You are a CIO-grade media analyst. Be CONCISE — 170-240 words max.",
         "",
-        "Call 1-2 tools max (prefer structured sources):",
-        "  Primary (US ticker):    get_tier1_media_news(ticker)        — Polygon Tier-1 filter",
-        "  Primary (any ticker):   get_tier1_latest_news('<ticker> stock') — NewsData.io Tier-1 filter",
-        "  Fallback (if sparse):   news_search('<ticker> earnings OR guidance OR lawsuit OR partnership 2026')",
-        "  Last resort:            get_company_news(ticker) (Finnhub, US only) OR get_stock_news(ticker) (DDG)",
+        "IMPORTANT: Use CASCADE logic — if one source returns 0 or poor results, try the next!",
+        "A good analyst NEVER reports 'no news found' without exhausting all sources.",
+        "",
+        "CASCADE for news (try in order until you have 3+ quality headlines):",
+        "  STEP 1 (US ticker):    get_tier1_media_news(ticker)        — Polygon Tier-1 filter",
+        "  STEP 2 (any ticker):   get_tier1_latest_news('<ticker> stock') — NewsData.io Tier-1 filter",
+        "  STEP 3 (if <3 items):  news_search('<ticker> earnings OR guidance OR lawsuit OR partnership 2026') — Tavily",
+        "  STEP 4 (if still sparse): get_company_news(ticker) — Finnhub (US only)",
+        "  STEP 5 (last resort):  get_stock_news(ticker) — DuckDuckGo (broadest reach)",
+        "",
+        "  MERGE logic: combine results from multiple steps if each returned only 1-2 items.",
+        "  Always aim for 3-6 quality headlines. De-duplicate by title similarity.",
+        "",
+        "For non-US tickers: Skip STEP 1 (Polygon is US-focused), start at STEP 2.",
+        "For obscure tickers: You may need all 5 steps. That's fine — be thorough.",
         "",
         "CRITICAL: Focus on Tier-1 media if present: WSJ, Bloomberg, Reuters, CNBC, Yahoo Finance.",
         "De-duplicate overlapping headlines (keep the most reputable source).",
@@ -204,20 +244,38 @@ wall_street_agent = Agent(
         "Your job is to output ONE clean section that the CIO can paste into the final answer.",
         "Be crisp, evidence-first, and avoid generic commentary.",
         "",
-        "Dynamic data acquisition (run in this order for EVERY symbol):",
-        "  1) Quantitative vote (FMP, required):",
-        "     Call: format_consensus_vote(symbol)",
-        "     Paste the vote lines EXACTLY as returned (includes █/░ bars).",
-        "     If vote is N/A, do NOT invent percentages.",
+        "A GOOD CIO NEVER GIVES UP ON ONE API FAILURE — cascade through alternatives!",
         "",
-        "  2) Expert evidence (Tavily, required):",
-        "     Call: extract_institution_snippets(symbol, days_back=30, max_snippets=3)",
-        "     Use ONLY the returned snippets (entity+date+url+takeaway).",
-        "     If none returned: explicitly state institutional evidence is sparse in last 30 days.",
-        "     For digital assets: Messari, Glassnode, Coinbase Research, Galaxy Digital, etc.",
+        "Dynamic data acquisition (CASCADE logic for EVERY symbol):",
         "",
-        "  3) Optional cross-check (EODHD, optional):",
-        "     If the user asks for price targets, or FMP vote is unavailable, call:",
+        "  1) Quantitative vote — CASCADE (try until one succeeds):",
+        "     STEP A: Call format_consensus_vote(symbol)",
+        "       → This internally cascades: FMP → EODHD → yfinance → news sentiment.",
+        "       → Paste the vote lines EXACTLY as returned (includes █/░ bars).",
+        "     STEP B: If vote still shows N/A after Step A, call:",
+        "       get_wall_street_signals(symbol) (EODHD headline-based bank extraction)",
+        "       → Use the vote_tally field to build approximate vote bars.",
+        "     STEP C: If ALL above fail, call:",
+        "       news_search('<symbol> analyst rating upgrade downgrade 2026')",
+        "       → Manually count bullish/bearish/neutral headlines to derive a semi-consensus.",
+        "       → Label it clearly: '⚠️ Approximate (derived from N headlines)'.",
+        "     NEVER output 'N/A' without trying at least 3 sources.",
+        "",
+        "  2) Expert evidence — CASCADE (try until you get 2+ snippets):",
+        "     STEP A: Call extract_institution_snippets(symbol, days_back=30, max_snippets=3)",
+        "     STEP B: If <2 snippets returned, widen search:",
+        "       Call extract_institution_snippets(symbol, days_back=90, max_snippets=3)",
+        "     STEP C: If still sparse, call:",
+        "       get_wall_street_signals(symbol) → use bank_votes as expert evidence.",
+        "     STEP D: If still sparse, call:",
+        "       finance_search('<symbol> Goldman Morgan Stanley analyst latest 2026')",
+        "       → Extract institution name + date + takeaway from the results.",
+        "     STEP E: If ALL fail, explicitly state:",
+        "       'Institutional evidence is sparse — based on available media coverage.'",
+        "       Then use the best available news snippets as qualitative evidence.",
+        "",
+        "  3) Cross-check (EODHD, always useful):",
+        "     If the user asks for price targets, or you need to verify vote against a second source:",
         "       get_wall_street_signals(symbol)  (headline-based bank extraction).",
         "",
         "MANDATORY OUTPUT TEMPLATE (exact structure):",
@@ -417,14 +475,13 @@ cio_team = Team(
         "  Level 3+ — run ALL checks before writing final output:",
         "",
         "  CHECK 0 — DATA FRESHNESS (always first):",
-        "    • Look at the [DATA AS OF: YYYY-MM-DD (Nd ago)] tags in CompanyAgent output.",
-        "    • Look at the most recent news date from NewsAgent.",
-        "    • Compute the gap: (most recent news date) − (financial data date).",
-        "    • If gap > 9 months: MANDATORY — add this line to your output:",
+        "    - Look at the [DATA AS OF: YYYY-MM-DD (Nd ago)] tags in CompanyAgent output.",
+        "    - Look at the most recent news date from NewsAgent.",
+        "    - Compute the gap: (most recent news date) - (financial data date).",
+        "    - If gap > 9 months: MANDATORY — add this line to your output:",
         "        ⚠️ Data Gap: Financial data is from [date] (~N months ago).",
         "           Latest news is from [date]. Forward projections may be outdated.",
-        "    • If gap > 18 months: escalate to ERROR level in your output.",
-        "    • Examples of bad gaps: earnings Q4 2024 + news Feb 2026 = 14mo gap.",
+        "    - If gap > 18 months: escalate to ERROR level in your output.",
         "",
         "  CHECK 1 — Macro vs Fundamentals conflict?",
         "  CHECK 2 — News confirms or challenges valuation thesis?",
@@ -432,7 +489,16 @@ cio_team = Team(
         "         → Use WallStreetAgent output (FMP vote + dated snippets).",
         "         → Include the quantitative vote: 🟢/🟡/🔴 percentages.",
         "         → CIO verdict: agree or disagree with majority? WHY?",
+        "         → If vote is labeled 'approximate' or 'derived', note this in output",
+        "           but STILL include it — approximate data is better than no data.",
         "  CHECK 4 — Data conflicts (price targets, earnings inconsistencies)?",
+        "  CHECK 5 — DATA SOURCE QUALITY:",
+        "         → If any agent's data came from fallback/alternative sources,",
+        "           note it briefly (e.g. '⚠️ Consensus derived from news sentiment analysis').",
+        "         → Adjust conviction level: direct API data = higher conviction,",
+        "           derived/approximate data = medium conviction, no data = lower conviction.",
+        "         → A good CIO uses ALL available evidence, even imperfect evidence,",
+        "           and adjusts confidence accordingly — never leaves a blank.",
         "",
         "  Commit: BUY / HOLD / SELL | Conviction | Target | Horizon",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
