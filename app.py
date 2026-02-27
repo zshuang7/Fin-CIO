@@ -233,82 +233,189 @@ _SYSTEM_LINE_PREFIXES = (
     "i'll analyze", "let me ", "i will ", "i'm going to ", "i need to ",
     "based on my analysis", "now i'll", "now let me", "let's start",
     "i've gathered", "i've analyzed", "i'll now", "i'll provide",
-    "i'll coordinate", "i'll delegate",
+    "i'll coordinate", "i'll delegate", "i'll search", "i'll get",
+    "i notice the query", "i notice this",
+    "let me also search", "let me try", "let me get",
+    "now let me get", "now let me search",
     "understand_query(", "finance_search(", "news_search(", "web_search(",
     "get_financial_summary(", "get_income_statement(", "get_macro_indicator(",
     "get_company_news(", "wall_street_search(", "get_wall_street_breakdown(",
+    "get_tier1_media_news(", "get_tier1_latest_news(", "get_media_news(",
+    "get_analyst_ratings(", "get_earnings_surprise(", "get_insider_transactions(",
+    "get_consensus_data(", "format_consensus_vote(", "extract_institution_snippets(",
+    "get_wall_street_signals(", "get_latest_news(",
     "completed in ", ".0s.", ".1s.", ".2s.", ".3s.", ".4s.", ".5s.",
-    "query analysis report", "1. query type", "2. identified ticker",
+    "query analysis report", "query analysis & context",
+    "query analysis results", "query understanding",
+    "query type classification",
+    "1. query type", "2. identified ticker",
     "3. user intent", "4. key context", "5. recommended", "6. priority",
     "7. suggested analysis",
-    "query analysis results",
     "🧠 query understanding",
+    "raw input:", "primary type:", "secondary type:",
+    "tickers identified", "time period",
+    "ai-generated context", "key findings from web research",
+    "recommended analysis approach", "specific analytical areas",
+    "phase 1:", "phase 2:", "phase 3:", "phase 4:", "phase 5:", "phase 6:",
+    "companyagent:", "macroagent:", "newsagent:", "wallstreetagent:", "reportmanager:",
+    "for detailed analytical comparison:",
 )
 
 def _escape_currency(text: str) -> str:
     """
     Prevent Streamlit / KaTeX from mis-parsing currency dollar signs as LaTeX
-    math delimiters.  e.g. 'HK$518.5' would otherwise render as 'HK' followed
-    by a broken inline-math expression, causing the character-by-character
-    display bug.  Replace $ with the Unicode full-width ＄ (U+FF04) which
-    looks identical in the UI but is not a KaTeX trigger.
+    math delimiters.  Replace $ with the Unicode full-width ＄ (U+FF04).
+    Also fix garbled LaTeX output where $XXX becomes broken math expressions.
     """
     if not text:
         return text
-    # Only escape $ that is followed by a digit, decimal, or comma (currency use).
-    # Leave $ alone when it's part of a Markdown code block (```) or HTML.
-    result = _re.sub(r'\$(?=[\d,.])', '＄', text)
-    return result
-
-
-#
-# NOTE: vote visualisation is now rendered inside the model's response
-# using text bars (█/░) to keep it in-context and copyable.
-#
+    # Fix already-garbled LaTeX: patterns like "992BvsCOST′s" or "$438B)"
+    text = _re.sub(
+        r'(?:\$|＄)?(\d[\d,.]*)\s*([BTMK])\s*\)?\s*(?:vs|market\s*cap|dominates)',
+        lambda m: f"＄{m.group(1)}{m.group(2)}",
+        text,
+        flags=_re.IGNORECASE,
+    )
+    # Escape $ before digits (currency use) — keep $ in code blocks untouched
+    text = _re.sub(r'\$(?=[\d,.])', '＄', text)
+    # Fix broken LaTeX remnants: sequences of mixed math/text junk
+    text = _re.sub(
+        r'(?:\*{2,}|[′\']s)\s*\(?\s*＄',
+        " (＄",
+        text,
+    )
+    return text
 
 
 def _clean_cio_output(text: str) -> str:
     """
-    Remove any residual system-thinking lines or verbose QueryAnalyst reports
-    from the CIO's final response.  Lines that start with known system-thinking
-    phrases are dropped; the rest is reassembled.
+    Aggressively clean the CIO's final response:
+      1. Strip entire internal-planning / query-analysis blocks
+      2. Strip individual system-thinking / chatter lines
+      3. De-duplicate repeated sections (same heading appearing 2+ times)
+      4. Collapse excessive whitespace
     """
     if not text:
         return text
 
+    # ── Phase 1: Strip entire blocks by header pattern ─────────────────────
+    _BLOCK_KILL_HEADERS = (
+        "query analysis & context research",
+        "query understanding",
+        "query analysis results",
+        "query type classification",
+        "recommended analysis approach",
+        "specific analytical areas",
+        "ai-generated context",
+        "🧠 query understanding",
+        "tickers identified",
+        "time period",
+        "key findings from web research",
+    )
+
     lines = text.split("\n")
     cleaned: list[str] = []
-    skip_block = False   # True while inside a numbered-list "report" block
+    skip_until_next_h2 = False
 
     for line in lines:
         stripped = line.strip()
         lower = stripped.lower()
 
-        # Detect start of a numbered report block (e.g. "1. Query Type Classification")
-        if _re.match(r'^[1-9]\d?\.\s+[A-Z]', stripped) and len(stripped) < 80:
-            # Only skip if it looks like internal report boilerplate
-            if any(kw in lower for kw in ["query type", "ticker", "user intent",
-                                           "key context", "recommended analysis",
-                                           "priority area", "suggested analysis"]):
-                skip_block = True
-        # A markdown header or blank line ends a skip block
-        if stripped.startswith("##") or stripped.startswith("**") or stripped == "":
-            skip_block = False
+        # Detect block-kill headers (## or bold ** headers)
+        is_header = stripped.startswith("##") or stripped.startswith("**")
+        if is_header:
+            header_text = _re.sub(r'^[#*\s]+', '', stripped).strip().lower()
+            if any(kw in header_text for kw in _BLOCK_KILL_HEADERS):
+                skip_until_next_h2 = True
+                continue
+            else:
+                skip_until_next_h2 = False
 
-        if skip_block:
+        # Also detect non-header lines that start a kill block
+        if not is_header and any(lower.startswith(kw) for kw in _BLOCK_KILL_HEADERS):
+            skip_until_next_h2 = True
             continue
 
-        # Drop individual system-thinking lines
+        if skip_until_next_h2:
+            # Keep going until we hit a real content header (## with emoji or known section)
+            if is_header and any(c in stripped for c in "📊🏛️🌐📰🎯⚠️🚀📐🔭📋🧭"):
+                skip_until_next_h2 = False
+            else:
+                continue
+
+        # ── Phase 2: Drop individual chatter / system lines ───────────────
         if any(lower.startswith(p) for p in _SYSTEM_LINE_PREFIXES):
             continue
-        # Drop lines that look like raw tool call completions
         if _re.search(r'completed in \d+\.\d+s', line):
+            continue
+        # Drop "Phase N:" planning lines
+        if _re.match(r'^phase\s+\d+[:\s]', lower):
+            continue
+        # Drop "CompanyAgent:", "MacroAgent:", "NewsAgent:" routing lines
+        if _re.match(r'^(company|macro|news|wall\s*street|report)agent:', lower):
+            continue
+        # Drop lines that are just "I'll analyze..." / "Let me search..."
+        if _re.match(r"^(i'?ll |let me |now i'?ll |now let me |i need to |i'm going to )", lower):
             continue
 
         cleaned.append(line)
 
-    result = "\n".join(cleaned).strip()
-    # Collapse runs of 3+ blank lines into 2
+    # ── Phase 3: De-duplicate repeated sections ───────────────────────────
+    # If the same ## heading appears multiple times, keep only the LAST occurrence
+    # (the CIO's synthesis is typically the last one)
+    result_lines = cleaned
+    heading_positions: dict[str, list[int]] = {}
+    for i, line in enumerate(result_lines):
+        s = line.strip()
+        if s.startswith("## "):
+            key = _re.sub(r'[^a-z0-9]', '', s.lower())
+            heading_positions.setdefault(key, []).append(i)
+
+    lines_to_remove: set[int] = set()
+    for key, positions in heading_positions.items():
+        if len(positions) <= 1:
+            continue
+        # Keep only the last occurrence; remove all earlier ones (including their content)
+        for p in positions[:-1]:
+            lines_to_remove.add(p)
+            # Remove content until the next heading or end
+            for j in range(p + 1, len(result_lines)):
+                if result_lines[j].strip().startswith("## "):
+                    break
+                lines_to_remove.add(j)
+
+    if lines_to_remove:
+        result_lines = [l for i, l in enumerate(result_lines) if i not in lines_to_remove]
+
+    # ── Phase 4: De-duplicate repeated paragraphs ─────────────────────────
+    # If a paragraph (3+ consecutive non-empty lines) appears twice, remove the duplicate
+    final_lines: list[str] = []
+    seen_paragraphs: set[str] = set()
+    current_para: list[str] = []
+
+    def flush_para():
+        if not current_para:
+            return
+        para_text = " ".join(l.strip() for l in current_para if l.strip())
+        # Normalize for comparison (lowercase, collapse whitespace)
+        para_key = _re.sub(r'\s+', ' ', para_text.lower().strip())[:300]
+        if len(para_key) > 50 and para_key in seen_paragraphs:
+            current_para.clear()
+            return
+        if len(para_key) > 50:
+            seen_paragraphs.add(para_key)
+        final_lines.extend(current_para)
+        current_para.clear()
+
+    for line in result_lines:
+        if line.strip() == "":
+            flush_para()
+            final_lines.append(line)
+        else:
+            current_para.append(line)
+    flush_para()
+
+    result = "\n".join(final_lines).strip()
     result = _re.sub(r'\n{3,}', '\n\n', result)
     return result
 
