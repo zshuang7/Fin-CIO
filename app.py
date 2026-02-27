@@ -535,38 +535,40 @@ def _extract_key_risk(text: str) -> str | None:
 def _detect_depth_hint(text: str) -> int:
     """
     Fast client-side depth heuristic (runs in microseconds, no API call).
-    Returns 1, 2, 4 to tell the CIO a depth level, or 0 meaning
+    Returns 1-5 to tell the CIO a depth level, or 0 meaning
     'let the CIO decide via its own depth-level assessment'.
 
     KEY RULES:
-    • Queries containing ANY stock ticker (numeric or alpha) → minimum Level 2.
-      The CIO's training data is months/years stale — live data is required.
+    • Any stock ticker → minimum Level 3 (need Wall Street + News sections).
     • "comprehensive/deep/analysis" keywords → Level 4.
+    • "quick/brief" + ticker → Level 2 (fast but still data-backed).
     • Level 1 is ONLY for pure concept questions (no ticker, no company name).
     """
     t = text.lower().strip()
     words = t.split()
     wc = len(words)
 
+    has_ticker = _has_numeric_ticker(text) or _has_alpha_ticker(text)
+
     deep_kw = ("analyz", "analysis", "research", "deep dive", "comprehensive",
                "detailed", "全面", "详细", "深度", "research note", "thesis",
-               "should i invest", "worth investing", "值得投资", "帮我写",
-               "full analysis", "in-depth", "indepth")
+               "should i invest", "worth investing", "worth buying", "值得投资",
+               "帮我写", "full analysis", "in-depth", "indepth")
+
+    quick_kw = ("quick", "brief", "tldr", "tl;dr", "just tell",
+                "one sentence", "一句话", "简单说", "简短", "price only",
+                "price?", "just the price")
 
     # ── Deep/comprehensive keywords → Level 4 (always, regardless of length) ─
     if any(k in t for k in deep_kw):
         return 4
 
     # ── Comparison queries must be Level 3+ (need 2 tickers + table) ──────────
-    # Without this, "compare TGT with WMT" becomes Level 2 and the CIO won't
-    # run the multi-agent comparison workflow.
     def _count_symbols_quick(raw: str) -> int:
         import re as __re
         syms: set[str] = set()
-        # Numeric exchange codes (may appear multiple times)
         for m in __re.finditer(r"(?<!\w)\d{1,6}(?:\s+|\.)(?:HK|T|L|SS|SZ|KS|TW|JP)(?!\w)", raw, __re.I):
             syms.add(m.group(0).upper().replace(" ", ""))
-        # Alpha tickers
         for mm in _US_TICKER_RE.finditer(raw):
             w = mm.group(1).upper()
             if w not in _NON_TICKER_WORDS:
@@ -576,18 +578,18 @@ def _detect_depth_hint(text: str) -> int:
     if any(k in t for k in ("compare", "vs", "versus")) and _count_symbols_quick(text) >= 2:
         return 3
 
-    # ── Guard: numeric exchange tickers must call CompanyAgent (never L1) ──
-    if _has_numeric_ticker(text):
+    # ── Ticker + "quick/brief" → Level 2 (fast but data-backed) ──────────────
+    if has_ticker and any(w in t for w in quick_kw):
         return 2
 
-    # ── Guard: alpha tickers (NVDA, TSLA, AAPL…) also need live data ────────
-    # "hows NVDA", "TSLA price", "what's AAPL doing" → live CompanyAgent call.
-    if _has_alpha_ticker(text):
-        return 2
+    # ── Any ticker present → Level 3 (standard analysis with all sections) ───
+    # This ensures 🏛️ Institutional & Expert Consensus and 📰 Media News
+    # are ALWAYS produced for stock queries.
+    if has_ticker:
+        return 3
 
-    # ── Explicit fast-path: user explicitly wants a one-liner ─────────────────
-    if any(w in t for w in ["quick", "brief", "tldr", "tl;dr", "just tell",
-                              "one sentence", "一句话", "简单说", "简短"]):
+    # ── Explicit fast-path: no ticker, user wants a one-liner ─────────────────
+    if any(w in t for w in quick_kw):
         return 1
 
     # ── Pure concept question: no ticker present, explains a term ─────────────
@@ -597,7 +599,6 @@ def _detect_depth_hint(text: str) -> int:
         return 1
 
     # ── Short query without ticker/company → Level 1 ─────────────────────────
-    # Only safe if NO ticker detected above (both guards already returned 2).
     if wc <= 4:
         return 1
 
@@ -1428,19 +1429,46 @@ if prompt:
             "ZERO tool calls. ≤100 words.]"
         ),
         2: (
-            # Numeric ticker variant — must call CompanyAgent to resolve company name
-            "[FAST-PATH Level 2 — NUMERIC TICKER: "
-            "Skip QueryAnalyst BUT MUST call CompanyAgent(ticker) FIRST. "
+            "[FAST-PATH Level 2 — QUICK CHECK: "
+            "Call CompanyAgent for live price/basics. Skip WallStreetAgent and NewsAgent. "
+            "≤250 words. No ## section headers.]"
+            if not _numeric else
+            "[FAST-PATH Level 2 — NUMERIC TICKER QUICK CHECK: "
+            "Call CompanyAgent(ticker) FIRST. "
             "NEVER guess company name from training data — "
             "Asian numeric codes are frequently mis-identified "
             "(e.g. 3690.HK=Meituan NOT Geely; 0175.HK=Geely; "
             "1211.HK=BYD; 2015.HK=Li Auto; 0700.HK=Tencent; "
             "9988.HK=Alibaba; 9866.HK=NIO; 9868.HK=XPeng; "
             "0941.HK=China Mobile; 0005.HK=HSBC). "
-            "≤250 words.]"
-            if _numeric else
-            "[FAST-PATH Level 2: skip QueryAnalyst. "
-            "AT MOST 1 sub-agent call. ≤250 words.]"
+            "≤250 words. No ## section headers.]"
+        ),
+        3: (
+            "[Level 3 — STANDARD ANALYSIS: "
+            "MUST call ALL of: CompanyAgent + WallStreetAgent + NewsAgent. "
+            "MUST include ## 🏛️ Institutional & Expert Consensus (Wall Street bank research) "
+            "AND ## 📰 Latest Media News & Sentiment (media headlines) as SEPARATE sections. "
+            "These are MANDATORY — do NOT skip them.]"
+            if not _numeric else
+            "[Level 3 — STANDARD ANALYSIS (NUMERIC TICKER): "
+            "Call CompanyAgent(ticker) FIRST to identify the company — "
+            "NEVER guess from training data. "
+            "Asian numeric codes: 3690.HK=Meituan, 0175.HK=Geely, "
+            "1211.HK=BYD, 2015.HK=Li Auto, 0700.HK=Tencent, "
+            "9988.HK=Alibaba, 9866.HK=NIO, 9868.HK=XPeng. "
+            "MUST call ALL of: CompanyAgent + WallStreetAgent + NewsAgent. "
+            "MUST include ## 🏛️ Institutional & Expert Consensus (Wall Street bank research) "
+            "AND ## 📰 Latest Media News & Sentiment (media headlines) as SEPARATE sections. "
+            "These are MANDATORY — do NOT skip them.]"
+        ),
+        4: (
+            "[Level 4 — COMPREHENSIVE ANALYSIS: "
+            "MUST call ALL of: MacroAgent + CompanyAgent + WallStreetAgent + NewsAgent. "
+            "MUST include ALL sections: ## 📊 Fundamentals (TABLE), "
+            "## 🏛️ Institutional & Expert Consensus (Wall Street banks, SEPARATE), "
+            "## 📰 Latest Media News & Sentiment (media, SEPARATE), "
+            "## 🌐 Macro & Sector, ## 🎯 Recommendation, ## ⚠️ Key Risks & 🚀 Catalysts. "
+            "Be thorough and professional.]"
         ),
     }
     hint_prefix = _HINT_LABELS.get(depth_hint, "")
@@ -1540,19 +1568,30 @@ if prompt:
 
                     raw_final = "".join(chunks).strip()
                     final = _clean_cio_output(raw_final)
-                    # Hard enforcement: stock queries MUST include the consensus module section.
-                    if requires_consensus and "Institutional & Expert Consensus" not in final:
-                        _emit("__text__Missing consensus module — retrying once with stricter instruction.")
+
+                    # Hard enforcement: stock queries MUST include BOTH mandatory sections.
+                    missing_consensus = requires_consensus and "Institutional & Expert Consensus" not in final
+                    missing_media = requires_consensus and "Media News" not in final and "Latest Media" not in final
+                    if missing_consensus or missing_media:
+                        missing = []
+                        if missing_consensus:
+                            missing.append("🏛️ Institutional & Expert Consensus")
+                        if missing_media:
+                            missing.append("📰 Latest Media News & Sentiment")
+                        _emit(f"__text__Missing mandatory sections ({', '.join(missing)}) — retrying with stricter instruction.")
                         retry_query = (
                             f"{full_query}\n\n"
-                            "CRITICAL FIX: Your previous answer omitted the mandatory section.\n"
-                            "Re-answer and include EXACTLY this section header and template:\n"
-                            "🏛️ Institutional & Expert Consensus: <SYMBOL>\n"
-                            "[The Consensus Vote]\n"
-                            "🟢 Bullish: <XX>% | 🟡 Neutral: <XX>% | 🔴 Bearish: <XX>%\n"
+                            "CRITICAL FIX: Your previous answer omitted mandatory sections.\n"
+                            "You MUST include BOTH of these as SEPARATE ## sections:\n\n"
+                            "## 🏛️ Institutional & Expert Consensus: <SYMBOL>\n"
+                            "**Consensus Vote:** 🟢 Bullish: XX% | 🟡 Neutral: XX% | 🔴 Bearish: XX%\n"
                             "Market Sentiment: <...>\n"
-                            "[Expert Snippets & Evidence] (each line must include entity + date)\n"
-                            "[Final Synthesis]\n"
+                            "**Wall Street Research:** (bank-by-bank: Goldman, JPM, etc. with rating + target + thesis)\n"
+                            "**Synthesis:** 1-2 lines\n\n"
+                            "## 📰 Latest Media News & Sentiment\n"
+                            "- [Date] **Source**: Headline (Bloomberg, WSJ, Reuters, CNBC, FT)\n"
+                            "Sentiment verdict: Positive/Neutral/Negative\n\n"
+                            "CRITICAL: These are TWO SEPARATE sections. Do NOT merge them.\n"
                             "Do not include query analysis reports or tool chatter."
                         )
                         try:
@@ -1564,7 +1603,7 @@ if prompt:
                             )
                             final = _clean_cio_output(str(content2))
                         except Exception:
-                            _emit("__text__Consensus retry failed — returning best available answer.")
+                            _emit("__text__Section retry failed — returning best available answer.")
 
                     # Hard enforcement: comparison queries MUST include the scorecard table
                     if requires_scorecard and "## 📊 Comparative Analysis" not in final:
@@ -1603,14 +1642,18 @@ if prompt:
                             else str(resp)
                         )
                         cleaned = _clean_cio_output(str(content))
-                        if requires_consensus and "Institutional & Expert Consensus" not in cleaned:
-                            _emit("__text__Missing consensus module — retrying once with stricter instruction.")
+                        missing_consensus = requires_consensus and "Institutional & Expert Consensus" not in cleaned
+                        missing_media = requires_consensus and "Media News" not in cleaned and "Latest Media" not in cleaned
+                        if missing_consensus or missing_media:
+                            _emit("__text__Missing mandatory sections — retrying with stricter instruction.")
                             retry_query = (
                                 f"{full_query}\n\n"
-                                "CRITICAL FIX: Include the mandatory section header:\n"
-                                "🏛️ Institutional & Expert Consensus: <SYMBOL>\n"
-                                "with vote + dated expert snippets.\n"
-                                "Do not include query analysis reports."
+                                "CRITICAL FIX: Include BOTH mandatory sections as SEPARATE ## headers:\n"
+                                "## 🏛️ Institutional & Expert Consensus: <SYMBOL>\n"
+                                "(Consensus Vote + Wall Street Research bank-by-bank + Synthesis)\n"
+                                "## 📰 Latest Media News & Sentiment\n"
+                                "(Tier-1 media headlines + sentiment verdict)\n"
+                                "Do not include query analysis reports or tool chatter."
                             )
                             try:
                                 resp2 = team.run(retry_query)
@@ -1621,7 +1664,7 @@ if prompt:
                                 )
                                 cleaned = _clean_cio_output(str(content2))
                             except Exception:
-                                _emit("__text__Consensus retry failed — returning best available answer.")
+                                _emit("__text__Section retry failed — returning best available answer.")
 
                         if requires_scorecard and "## 📊 Comparative Analysis" not in cleaned:
                             _emit("__text__Missing comparative analysis — retrying once with stricter instruction.")
