@@ -25,17 +25,27 @@ import queue
 import threading
 from typing import Optional
 
-from .schemas import AuditVerdict, DimensionScore, StructuralCheckResult, run_structural_check
-from .judge import run_audit
+from .schemas import (
+    AuditVerdict,
+    DimensionScore,
+    SFCAuditResult,
+    SFCDimensionScore,
+    StructuralCheckResult,
+    run_structural_check,
+)
+from .judge import run_audit, run_sfc_judge
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "run_audit_async",
     "run_audit_sync",
+    "run_sfc_judge",
     "run_structural_check",
     "AuditVerdict",
     "DimensionScore",
+    "SFCAuditResult",
+    "SFCDimensionScore",
     "StructuralCheckResult",
 ]
 

@@ -1,8 +1,15 @@
 """
-audit/judge.py — GPT-4o compliance judge engine.
+audit/judge.py — Multi-layer compliance judge engine.
 
-Chains a fast structural pre-check with a GPT-4o LLM evaluation to produce
-an AuditVerdict for each CIO response.
+Layer 1: Structural pre-check (instant, no LLM)
+Layer 2: GPT-4o general compliance judge
+Layer 3: DeepSeek SFC-specific compliance judge (HK regulatory focus)
+         使用 DeepSeek 作为第二道 LLM-as-a-judge，专门检查 SFC 合规性
+
+Note for Derivatives:
+  When structured product / derivatives recommendations are added,
+  the SFC judge will additionally check ISDA documentation references
+  and SFC Code of Conduct Chapter 11 (Derivatives & Complex Products).
 """
 
 from __future__ import annotations
@@ -133,6 +140,115 @@ def _call_gpt4o_judge(
         return None
 
 
+# ── DeepSeek SFC compliance judge ────────────────────────────────────────────
+
+_SFC_JUDGE_SYSTEM = """\
+You are a Senior Compliance Officer at the Hong Kong Securities and Futures \
+Commission (SFC). You are evaluating an AI-generated investment recommendation \
+for regulatory compliance under HK law.
+
+Evaluate on these three dimensions (each 0-10):
+
+## SFC Tone (0-10)
+- No guaranteed returns or profit promises
+- No aggressive "you should buy" without suitability context
+- Appropriate use of conditional language ("may", "could", "tends to")
+- Distinguishes clearly between facts, opinions, and projections
+- Does not use misleading or deceptive language
+
+## Explainability (0-10)
+- Reasoning is traceable (data → interpretation → conclusion)
+- Key claims are supported by cited data or named sources
+- No circular reasoning or unsubstantiated assertions
+- Transparent about data limitations and staleness
+- AI/algorithmic nature is disclosed
+
+## Risk Disclosure (0-10)
+- Contains a clear disclaimer (not financial advice / AI-generated)
+- Material risks are identified and not downplayed
+- Risk warnings are proportionate to recommendation aggressiveness
+- No omission of obvious counterarguments
+- Suitability caveats present (investor type, risk tolerance)
+
+Overall: PASS (>=24/30), REVIEW (18-23/30), FAIL (<18/30).
+
+Respond with VALID JSON:
+{
+  "sfc_tone": {"score": <0-10>, "reason": "<1 sentence>"},
+  "explainability": {"score": <0-10>, "reason": "<1 sentence>"},
+  "risk_disclosure": {"score": <0-10>, "reason": "<1 sentence>"},
+  "total_score": <0-30>,
+  "verdict": "PASS"|"REVIEW"|"FAIL",
+  "remediation": "<specific fixes needed, or 'None required'>"
+}
+Be rigorous but fair. Only FAIL for genuinely serious SFC violations."""
+
+
+def run_sfc_judge(
+    cio_answer: str,
+    recommendation_json: str = "",
+) -> Optional[dict]:
+    """Run SFC compliance check using DeepSeek as LLM-as-a-judge.
+
+    This is a SECOND DeepSeek call (separate from CIO synthesis) that
+    specifically evaluates HK SFC regulatory compliance.
+
+    Args:
+        cio_answer: The CIO's final markdown answer.
+        recommendation_json: Structured recommendation JSON (from dspy_report.py).
+
+    Returns:
+        Dict with SFC audit result, or None on failure.
+    """
+    api_key = os.getenv("DEEPSEEK_API_KEY", "")
+    if not api_key:
+        logger.warning("DEEPSEEK_API_KEY not set — skipping SFC judge")
+        return None
+
+    try:
+        import litellm
+
+        user_msg = f"""## Recommendation JSON
+{recommendation_json or '(Not available — evaluate from CIO text only)'}
+
+## CIO Analysis Text
+{cio_answer[:6000]}
+
+Evaluate this for HK SFC compliance and return your JSON verdict."""
+
+        response = litellm.completion(
+            model=os.getenv("MODEL_ID", "deepseek/deepseek-chat"),
+            api_key=api_key,
+            messages=[
+                {"role": "system", "content": _SFC_JUDGE_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.1,
+            max_tokens=500,
+            response_format={"type": "json_object"},
+        )
+
+        raw = response.choices[0].message.content or "{}"
+        data = json.loads(raw)
+
+        logger.info(
+            "SFC judge: %s (%d/30) — Tone:%s Explain:%s Risk:%s",
+            data.get("verdict", "?"),
+            data.get("total_score", 0),
+            data.get("sfc_tone", {}).get("score", "?"),
+            data.get("explainability", {}).get("score", "?"),
+            data.get("risk_disclosure", {}).get("score", "?"),
+        )
+        return data
+
+    except ImportError:
+        logger.warning("litellm not installed — skipping SFC judge")
+        return None
+    except Exception as exc:
+        logger.error("SFC judge failed: %s", exc)
+        return None
+
+
 # ── Main audit function ─────────────────────────────────────────────────────
 
 def run_audit(
@@ -140,26 +256,37 @@ def run_audit(
     agent_data: str = "",
     level: str = "standard",
     use_llm: bool = True,
+    recommendation_json: str = "",
 ) -> AuditVerdict:
     """Run the full compliance audit on a CIO answer.
 
-    1. Structural pre-check (instant)
-    2. GPT-4o judge (if use_llm=True and OPENAI_API_KEY is set)
-    3. Falls back to structural-only verdict if LLM fails
+    1. Structural pre-check (instant, no LLM)
+    2. GPT-4o general judge (if use_llm=True and OPENAI_API_KEY is set)
+    3. Falls back to structural-only verdict if GPT-4o fails
+    4. SFC-specific DeepSeek judge runs independently (results attached to verdict)
 
     Args:
         cio_answer: The final markdown text shown to the user.
         agent_data: Concatenated raw outputs from agents (for cross-checking).
         level: Analysis level (fast/standard/master/deep_dive/comparison).
-        use_llm: Whether to attempt the GPT-4o judge call.
+        use_llm: Whether to attempt the LLM judge calls.
+        recommendation_json: Structured recommendation JSON for SFC judge.
     """
     structural = run_structural_check(cio_answer, level)
 
     if not use_llm:
         return _build_structural_verdict(structural, level)
 
+    # Layer 2: GPT-4o general judge
     llm_verdict = _call_gpt4o_judge(cio_answer, agent_data, level)
-    if llm_verdict is not None:
-        return llm_verdict
+    verdict = llm_verdict if llm_verdict is not None else _build_structural_verdict(structural, level)
 
-    return _build_structural_verdict(structural, level)
+    # Layer 3: SFC-specific DeepSeek judge (runs independently, attaches to verdict)
+    try:
+        sfc_result = run_sfc_judge(cio_answer, recommendation_json)
+        if sfc_result is not None:
+            verdict.sfc_audit = sfc_result  # type: ignore[attr-defined]
+    except Exception as exc:
+        logger.debug("SFC judge attachment failed: %s", exc)
+
+    return verdict

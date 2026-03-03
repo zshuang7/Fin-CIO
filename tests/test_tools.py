@@ -21,6 +21,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from audit.schemas import (
     AuditVerdict,
     DimensionScore,
+    SFCAuditResult,
+    SFCDimensionScore,
     FmpConsensusOutput,
     PolygonNewsOutput,
     NewsDataOutput,
@@ -366,3 +368,153 @@ class TestJudgeFallback:
         text = "Quick take on AAPL. Looks good.\n> Not financial advice."
         verdict = run_audit(text, agent_data="", level="fast", use_llm=False)
         assert verdict.completeness.flag == "pass"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Section 8: SFC Audit Schemas (HK SFC compliance models)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestSFCSchemas:
+    def test_sfc_dimension_score_valid(self):
+        s = SFCDimensionScore(score=8, reason="Good SFC tone")
+        assert s.score == 8
+        assert s.reason == "Good SFC tone"
+
+    def test_sfc_dimension_score_bounds(self):
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            SFCDimensionScore(score=11, reason="Over max")
+        with pytest.raises(ValidationError):
+            SFCDimensionScore(score=-1, reason="Under min")
+
+    def test_sfc_audit_result_full(self):
+        result = SFCAuditResult(
+            sfc_tone=SFCDimensionScore(score=8, reason="Appropriate language"),
+            explainability=SFCDimensionScore(score=9, reason="Clear reasoning"),
+            risk_disclosure=SFCDimensionScore(score=7, reason="Missing one risk"),
+            total_score=24,
+            verdict="PASS",
+            remediation="None required",
+        )
+        assert result.verdict == "PASS"
+        assert result.total_score == 24
+
+    def test_sfc_audit_result_defaults(self):
+        result = SFCAuditResult()
+        assert result.verdict == "REVIEW"
+        assert result.total_score == 0
+
+    def test_audit_verdict_with_sfc(self):
+        sfc = SFCAuditResult(
+            sfc_tone=SFCDimensionScore(score=6, reason="Some violations"),
+            explainability=SFCDimensionScore(score=7, reason="OK"),
+            risk_disclosure=SFCDimensionScore(score=5, reason="Missing disclaimers"),
+            total_score=18,
+            verdict="REVIEW",
+            remediation="Add risk warnings",
+        )
+        verdict = AuditVerdict(
+            overall_grade="B",
+            overall_score=72,
+            factuality=DimensionScore(score=20, flag="pass", reason="OK"),
+            compliance=DimensionScore(score=18, flag="pass", reason="OK"),
+            logic=DimensionScore(score=16, flag="warn", reason="Minor issues"),
+            completeness=DimensionScore(score=18, flag="pass", reason="OK"),
+            sfc_audit=sfc,
+        )
+        assert verdict.sfc_audit is not None
+        assert verdict.sfc_audit.verdict == "REVIEW"
+
+    def test_audit_verdict_without_sfc(self):
+        verdict = AuditVerdict(
+            overall_grade="A",
+            overall_score=90,
+            factuality=DimensionScore(score=23, flag="pass", reason="Good"),
+            compliance=DimensionScore(score=22, flag="pass", reason="Good"),
+            logic=DimensionScore(score=22, flag="pass", reason="Good"),
+            completeness=DimensionScore(score=23, flag="pass", reason="Good"),
+        )
+        assert verdict.sfc_audit is None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Section 9: DSPy Report module (structural tests, no LLM calls)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestDspyReportHelpers:
+    def test_normalize_recommendation(self):
+        from dspy_report import _normalize_recommendation
+        assert _normalize_recommendation("BUY") == "BUY"
+        assert _normalize_recommendation("Strong Buy") == "BUY"
+        assert _normalize_recommendation("SELL") == "SELL"
+        assert _normalize_recommendation("Underweight / Sell") == "SELL"
+        assert _normalize_recommendation("HOLD") == "HOLD"
+        assert _normalize_recommendation("Neutral") == "HOLD"
+        assert _normalize_recommendation("something else") == "HOLD"
+
+    def test_normalize_conviction(self):
+        from dspy_report import _normalize_conviction
+        assert _normalize_conviction("High") == "High"
+        assert _normalize_conviction("high conviction") == "High"
+        assert _normalize_conviction("Low") == "Low"
+        assert _normalize_conviction("very low") == "Low"
+        assert _normalize_conviction("Medium") == "Medium"
+        assert _normalize_conviction("moderate") == "Medium"
+
+    def test_safe_parse_json_list_valid(self):
+        from dspy_report import _safe_parse_json_list
+        result = _safe_parse_json_list('["risk 1", "risk 2", "risk 3"]')
+        assert result == ["risk 1", "risk 2", "risk 3"]
+
+    def test_safe_parse_json_list_invalid(self):
+        from dspy_report import _safe_parse_json_list
+        result = _safe_parse_json_list("- risk 1\n- risk 2")
+        assert len(result) == 2
+        assert "risk 1" in result[0]
+
+    def test_safe_parse_json_list_single(self):
+        from dspy_report import _safe_parse_json_list
+        result = _safe_parse_json_list("just a single risk")
+        assert result == ["just a single risk"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Section 10: SFC metric in optimize.py
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestSFCMetric:
+    def test_sfc_metric_penalizes_guarantees(self):
+        """CIO output with 'guaranteed returns' should score lower."""
+        import dspy
+        from optimize import cio_metric
+
+        class FakePrediction:
+            opening_take = "AAPL is guaranteed to rise."
+            analysis = "This stock will definitely double. You should buy immediately."
+            decision_frame = "Buy now for risk-free returns."
+
+        ex = dspy.Example(query="AAPL analysis", level="fast").with_inputs("query", "level")
+        pred = FakePrediction()
+        score = cio_metric(ex, pred)
+        assert score < 0.7  # should be penalized
+
+    def test_sfc_metric_rewards_hedging(self):
+        """CIO output with SFC-appropriate hedging should score better."""
+        import dspy
+        from optimize import cio_metric
+
+        class FakePrediction:
+            opening_take = "AAPL appears to offer a reasonable risk-reward at current levels."
+            analysis = ("Based on available data, the company may benefit from AI trends. "
+                       "We believe the margin trajectory suggests moderate upside potential. "
+                       "This could appeal to growth-oriented investors.")
+            decision_frame = ("This tends to fit investors who can live with tech volatility "
+                            "and care about long-term compounding.")
+
+        ex = dspy.Example(query="AAPL analysis", level="fast").with_inputs("query", "level")
+        pred = FakePrediction()
+        score = cio_metric(ex, pred)
+        assert score > 0.5  # hedged language should score better

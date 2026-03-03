@@ -77,15 +77,16 @@ def cio_metric(example: dspy.Example, prediction: dspy.Prediction, trace=None) -
 
     Returns a float in [0, 1] — higher is better.
 
-    Axes (rebalanced with compliance dimensions):
-      1. Required sections (25%)
-      2. No AI chatter (15%)
-      3. Word count range (15%)
+    Axes (rebalanced with SFC compliance dimensions):
+      1. Required sections (20%)
+      2. No AI chatter (10%)
+      3. Word count range (10%)
       4. Narrative quality (10%)
       5. Decision frame (10%)
-      6. Disclaimer present (10%)          [NEW — compliance]
-      7. No hallucinated banks (5%)         [NEW — compliance]
-      8. Internal consistency (10%)         [NEW — compliance]
+      6. Disclaimer present (10%)          [compliance]
+      7. No hallucinated banks (5%)         [compliance]
+      8. Internal consistency (10%)         [compliance]
+      9. SFC tone compliance (15%)          [NEW — HK SFC regulatory]
     """
     level = example.get("level", "standard")
     rendered = render_markdown(prediction, level)
@@ -93,35 +94,35 @@ def cio_metric(example: dspy.Example, prediction: dspy.Prediction, trace=None) -
     max_score = 0.0
     lower = rendered.lower()
 
-    # 1. Required sections present (25%)
+    # 1. Required sections present (20%)
     required = _REQUIRED_SECTIONS.get(level, [])
     if required:
-        max_score += 25
+        max_score += 20
         found = sum(1 for s in required if s in rendered)
-        score += 25 * (found / len(required))
+        score += 20 * (found / len(required))
     else:
-        max_score += 25
-        score += 25
+        max_score += 20
+        score += 20
 
-    # 2. No AI chatter (15%)
-    max_score += 15
+    # 2. No AI chatter (10%)
+    max_score += 10
     chatter_count = sum(1 for phrase in _AI_CHATTER if phrase in lower[:200])
     if chatter_count == 0:
-        score += 15
+        score += 10
     elif chatter_count == 1:
-        score += 7
+        score += 5
     # else: 0
 
-    # 3. Word count within range (15%)
-    max_score += 15
+    # 3. Word count within range (10%)
+    max_score += 10
     wc = len(rendered.split())
     lo, hi = _WORD_COUNT_RANGES.get(level, (200, 1500))
     if lo <= wc <= hi:
-        score += 15
+        score += 10
     elif wc < lo:
-        score += max(0, 15 * (wc / lo))
+        score += max(0, 10 * (wc / lo))
     else:
-        score += max(0, 15 * (hi / wc))
+        score += max(0, 10 * (hi / wc))
 
     # 4. Narrative quality — no giant tables (10%)
     max_score += 10
@@ -188,6 +189,39 @@ def cio_metric(example: dspy.Example, prediction: dspy.Prediction, trace=None) -
         score += 2  # strong inconsistency
     else:
         score += 6  # mild mismatch
+
+    # 9. SFC tone compliance (15%) — HK regulatory
+    # Check for language patterns that violate SFC Code of Conduct:
+    # - No guarantees ("guaranteed", "will definitely", "certain to")
+    # - Uses conditional language ("may", "could", "tends to")
+    # - Separates facts from opinions
+    # - No aggressive personalized advice ("you should buy")
+    max_score += 15
+    sfc_score = 15  # start full, deduct for violations
+
+    sfc_violations = [
+        (r"\bguaranteed?\b", 4),
+        (r"\bwill definitely\b", 4),
+        (r"\bcertain to\b", 3),
+        (r"\byou should (buy|sell)\b", 5),
+        (r"\byou must (buy|sell|invest)\b", 5),
+        (r"\brisk[- ]free\b", 3),
+        (r"\bno risk\b", 3),
+    ]
+    for pattern, penalty in sfc_violations:
+        if re.search(pattern, lower):
+            sfc_score = max(0, sfc_score - penalty)
+
+    # Reward conditional / hedged language (SFC-compliant framing)
+    hedging_markers = ["may ", "could ", "tends to", "might ", "appears to",
+                       "suggests ", "in our view", "we believe", "based on available data"]
+    hedge_count = sum(1 for h in hedging_markers if h in lower)
+    if hedge_count >= 3:
+        sfc_score = min(15, sfc_score + 2)
+    elif hedge_count >= 1:
+        sfc_score = min(15, sfc_score + 1)
+
+    score += sfc_score
 
     return score / max_score if max_score > 0 else 0.0
 

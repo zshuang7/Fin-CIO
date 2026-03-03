@@ -55,8 +55,11 @@ class ReportEngine(BaseTool):
 
     def save_full_report(self, ticker: str = "") -> str:
         """
-        Generates both Excel and PDF reports from the current SharedState.
+        Generates Excel, PDF, and JSON audit trail from the current SharedState.
         This is the primary method the ReportManager agent should call.
+
+        Pipeline: dspy_report.py (structured rec) → SharedState → this method
+        Output: Excel + PDF + JSON audit trail file
 
         Args:
             ticker: Override ticker if needed (default: uses SharedState.ticker).
@@ -68,7 +71,48 @@ class ReportEngine(BaseTool):
         results = []
         results.append(self.save_to_excel())
         results.append(self.save_to_pdf())
+        results.append(self._save_audit_trail())
         return "\n".join(results)
+
+    def _save_audit_trail(self) -> str:
+        """Write structured recommendation + SFC audit to a JSON audit file.
+        This creates the compliance paper trail required by SFC.
+
+        Note for Derivatives: when ISDA documentation is added, this file
+        will also include product_complexity and isda_compliance fields.
+        """
+        import json as _json
+        state = get_state()
+        if not state.recommendation_json and not state.sfc_audit_result:
+            return "No structured recommendation to audit."
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{state.ticker or 'audit'}_{ts}_audit.json"
+        filepath = os.path.join(self.output_dir, filename)
+
+        audit_record = {
+            "ticker": state.ticker,
+            "timestamp": state.timestamp,
+            "recommendation": state.recommendation_json,
+            "sfc_audit": state.sfc_audit_result,
+            "risk_metrics_snapshot": state.risk_metrics,
+            "data_sources": {
+                "raw_metrics": bool(state.raw_metrics),
+                "income_data": bool(state.income_data),
+                "cashflow_data": bool(state.cashflow_data),
+                "balance_sheet_data": bool(state.balance_sheet_data),
+                "risk_metrics": bool(state.risk_metrics),
+            },
+        }
+
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                _json.dump(audit_record, f, ensure_ascii=False, indent=2)
+            logger.info(f"[report_engine] Audit trail saved: {filepath}")
+            return f"Audit trail saved: {filepath}"
+        except Exception as e:
+            logger.error(f"[report_engine] Audit trail error: {e}")
+            return f"Error saving audit trail: {e}"
 
     # ── Excel ────────────────────────────────────────────────────────────
 
@@ -290,6 +334,60 @@ class ReportEngine(BaseTool):
             for cat in state.catalysts:
                 story.append(_p(f"→  {cat}"))
 
+        # ── Structured Recommendation (from DSPy dspy_report.py) ──────
+        if state.recommendation_json:
+            rj = state.recommendation_json
+            story.append(_hr(ACCENT, 0.5))
+            story.append(_p("Structured Recommendation (DSPy Output)", "h2"))
+            rec_data = [
+                ["Field", "Value"],
+                ["Recommendation", str(rj.get("recommendation", "N/A"))],
+                ["Target Price", str(rj.get("target_price", "N/A"))],
+                ["Conviction", str(rj.get("conviction", "N/A"))],
+                ["Time Horizon", str(rj.get("time_horizon", "N/A"))],
+                ["Model", str(rj.get("model", "N/A"))],
+            ]
+            rec_tbl = Table(rec_data, colWidths=[5*cm, 11*cm])
+            rec_tbl.setStyle(TableStyle([
+                ("BACKGROUND", (0,0), (-1,0), BLUE),
+                ("TEXTCOLOR",  (0,0), (-1,0), colors.white),
+                ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
+                ("FONTSIZE",   (0,0), (-1,-1), 8),
+                ("ROWBACKGROUNDS", (0,1), (-1,-1), [LIGHT, colors.white]),
+                ("GRID",       (0,0), (-1,-1), 0.5, colors.HexColor("#cfd8dc")),
+                ("PADDING",    (0,0), (-1,-1), 4),
+            ]))
+            story.append(rec_tbl)
+            if rj.get("reasoning_summary"):
+                story.append(Spacer(1, 0.2*cm))
+                story.append(_p(f"Thesis: {rj['reasoning_summary']}"))
+            # Note for Derivatives: derivatives_note appears here when
+            # Black-Scholes / ISDA pricing is integrated
+            if rj.get("derivatives_note") and rj["derivatives_note"] not in ("N/A", ""):
+                story.append(_p(f"Derivatives Note: {rj['derivatives_note']}"))
+
+        # ── SFC Compliance Badge ──────────────────────────────────────
+        if state.sfc_audit_result:
+            sfc = state.sfc_audit_result
+            verdict = sfc.get("verdict", "N/A")
+            total = sfc.get("total_score", 0)
+            v_color = GREEN if verdict == "PASS" else AMBER if verdict == "REVIEW" else RED
+            v_bg = GREEN_BG if verdict == "PASS" else AMBER_BG if verdict == "REVIEW" else RED_BG
+
+            story.append(_hr(GREY, 0.5))
+            sfc_style = _s("SFC", "Normal", fontSize=10, fontName="Helvetica-Bold",
+                           textColor=v_color, backColor=v_bg, borderPad=6)
+            story.append(Paragraph(
+                f"SFC Compliance: {verdict} ({total}/30) | "
+                f"Tone: {sfc.get('sfc_tone', {}).get('score', '?')}/10 | "
+                f"Explainability: {sfc.get('explainability', {}).get('score', '?')}/10 | "
+                f"Risk Disclosure: {sfc.get('risk_disclosure', {}).get('score', '?')}/10",
+                sfc_style,
+            ))
+            remediation = sfc.get("remediation", "")
+            if remediation and remediation != "None required":
+                story.append(_p(f"Remediation: {remediation}", "disc"))
+
         # ── Disclaimer ───────────────────────────────────────────────────
         story += [
             Spacer(1, 0.6*cm),
@@ -297,7 +395,8 @@ class ReportEngine(BaseTool):
             _p("Disclaimer: This report is generated by an AI multi-agent system "
                "for informational purposes only. It does not constitute financial advice. "
                "Past performance is not indicative of future results. "
-               "Always conduct your own due diligence.", "disc"),
+               "Always conduct your own due diligence. "
+               "This system is subject to HK SFC Code of Conduct requirements.", "disc"),
         ]
 
         doc.build(story)

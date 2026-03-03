@@ -50,6 +50,19 @@ class SharedState:
     time_horizon: str = ""          # "Short-term" | "Medium-term" | "Long-term"
     conviction: str = ""            # "High" | "Medium" | "Low"
 
+    # ── Structured recommendation (DSPy output from dspy_report.py) ───
+    # JSON dict: {recommendation, target_price, conviction, time_horizon,
+    #             reasoning_summary, risk_factors, catalysts, derivatives_note,
+    #             generated_at, model}
+    # Note for Derivatives: derivatives_note field will contain
+    # Delta/Gamma/Vega when Black-Scholes pricing is added.
+    recommendation_json: dict = field(default_factory=dict)
+
+    # ── SFC compliance audit result (from audit/judge.py DeepSeek judge) ──
+    # JSON dict: {sfc_tone, explainability, risk_disclosure,
+    #             total_score, verdict, remediation}
+    sfc_audit_result: dict = field(default_factory=dict)
+
     # ── Saved report paths ───────────────────────────────────────────────
     excel_path: str = ""
     pdf_path: str = ""
@@ -86,6 +99,10 @@ class SharedState:
             sheets["Balance Sheet"] = self.balance_sheet_data
         if self.risk_metrics:
             sheets["Risk Metrics"] = self.risk_metrics
+        if self.recommendation_json:
+            sheets["Recommendation"] = self.recommendation_json
+        if self.sfc_audit_result:
+            sheets["SFC Audit"] = self.sfc_audit_result
         if self.news_headlines:
             sheets["News"] = [{"Headline": h} for h in self.news_headlines]
         return sheets
