@@ -31,6 +31,12 @@ requests>=2.31.0
 # DSPy structured prompting and optimization
 dspy>=2.6
 
+# Vector DB (local RAG for historical reports, SFC docs, ISDA references)
+chromadb>=0.5.0
+
+# SQL audit trail (SFC compliance record-keeping)
+sqlalchemy>=2.0.0
+
 # Audit & testing
 pydantic>=2.0
 openai>=1.0

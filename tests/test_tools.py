@@ -485,6 +485,98 @@ class TestDspyReportHelpers:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Section 11: SQLite Audit DB
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestAuditDB:
+    def test_log_and_retrieve(self, tmp_path):
+        from tools.audit_db import AuditDB
+        db = AuditDB(db_path=str(tmp_path / "test.db"))
+        row_id = db.log_agent_call(
+            agent_name="CompanyAgent",
+            query_text="Analyze TSLA",
+            output_text="P/E is 72x",
+            ticker="TSLA",
+        )
+        assert row_id > 0
+        entries = db.get_recent_entries(ticker="TSLA")
+        assert len(entries) == 1
+        assert entries[0]["agent_name"] == "CompanyAgent"
+
+    def test_cio_decision_log(self, tmp_path):
+        from tools.audit_db import AuditDB
+        db = AuditDB(db_path=str(tmp_path / "test2.db"))
+        row_id = db.log_cio_decision(
+            query="Analyze AAPL",
+            cio_output="AAPL looks strong...",
+            ticker="AAPL",
+            compliance_score=90,
+            sfc_verdict="PASS",
+            sfc_score=28,
+            recommendation="BUY",
+            rec_json={"recommendation": "BUY", "target_price": "$200"},
+        )
+        assert row_id > 0
+        history = db.get_compliance_history("AAPL")
+        assert len(history) == 1
+        assert history[0]["sfc_verdict"] == "PASS"
+
+    def test_count_entries(self, tmp_path):
+        from tools.audit_db import AuditDB
+        db = AuditDB(db_path=str(tmp_path / "test3.db"))
+        assert db.count_entries() == 0
+        db.log_agent_call(agent_name="Test", query_text="q1")
+        db.log_agent_call(agent_name="Test", query_text="q2")
+        assert db.count_entries() == 2
+        assert db.count_entries(agent_name="Test") == 2
+        assert db.count_entries(agent_name="Other") == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Section 12: Knowledge Engine (chunking, graceful fallback)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestKnowledgeEngine:
+    def test_chunk_short_text(self):
+        from tools.knowledge_engine import _chunk_text
+        chunks = _chunk_text("Short text", max_chars=1500)
+        assert len(chunks) == 1
+        assert chunks[0] == "Short text"
+
+    def test_chunk_long_text(self):
+        from tools.knowledge_engine import _chunk_text
+        text = "A " * 1000
+        chunks = _chunk_text(text, max_chars=500)
+        assert len(chunks) > 1
+
+    def test_chunk_paragraphs(self):
+        from tools.knowledge_engine import _chunk_text
+        text = ("First paragraph with enough content to exceed limit. " * 10
+                + "\n\n"
+                + "Second paragraph with enough content to exceed limit. " * 10)
+        chunks = _chunk_text(text, max_chars=300)
+        assert len(chunks) >= 2
+
+    def test_embed_graceful_fallback(self):
+        from tools.knowledge_engine import embed_report
+        result = embed_report(ticker="TEST", analysis_text="test")
+        assert isinstance(result, str)
+
+    def test_search_graceful_fallback(self):
+        from tools.knowledge_engine import search_similar
+        results = search_similar("test query")
+        assert isinstance(results, list)
+
+    def test_stats_graceful_fallback(self):
+        from tools.knowledge_engine import get_store_stats
+        stats = get_store_stats()
+        assert "reports_count" in stats
+        assert "chroma_path" in stats
+
+
 class TestSFCMetric:
     def test_sfc_metric_penalizes_guarantees(self):
         """CIO output with 'guaranteed returns' should score lower."""

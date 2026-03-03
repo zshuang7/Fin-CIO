@@ -72,6 +72,8 @@ class ReportEngine(BaseTool):
         results.append(self.save_to_excel())
         results.append(self.save_to_pdf())
         results.append(self._save_audit_trail())
+        results.append(self._embed_to_chromadb())
+        results.append(self._log_to_audit_db())
         return "\n".join(results)
 
     def _save_audit_trail(self) -> str:
@@ -113,6 +115,54 @@ class ReportEngine(BaseTool):
         except Exception as e:
             logger.error(f"[report_engine] Audit trail error: {e}")
             return f"Error saving audit trail: {e}"
+
+    def _embed_to_chromadb(self) -> str:
+        """Auto-embed the CIO analysis into ChromaDB for future RAG retrieval."""
+        state = get_state()
+        analysis_text = state.cio_reasoning or state.company_summary
+        if not analysis_text or not state.ticker:
+            return "No analysis to embed."
+        try:
+            from tools.knowledge_engine import embed_report
+            metadata = {
+                "recommendation": state.recommendation,
+                "conviction": state.conviction,
+                "time_horizon": state.time_horizon,
+            }
+            if state.recommendation_json:
+                metadata["rec_summary"] = state.recommendation_json.get("reasoning_summary", "")
+            return embed_report(
+                ticker=state.ticker,
+                analysis_text=analysis_text,
+                metadata=metadata,
+            )
+        except Exception as e:
+            logger.debug("[report_engine] ChromaDB embed skipped: %s", e)
+            return "ChromaDB embed skipped (non-critical)."
+
+    def _log_to_audit_db(self) -> str:
+        """Log the report generation event to the SQLite audit trail."""
+        state = get_state()
+        if not state.ticker:
+            return "No ticker to log."
+        try:
+            from tools.audit_db import get_audit_db
+            db = get_audit_db()
+            sfc = state.sfc_audit_result
+            row_id = db.log_cio_decision(
+                query=state.query,
+                cio_output=state.cio_reasoning or state.company_summary or "",
+                ticker=state.ticker,
+                compliance_score=sfc.get("total_score", -1) if sfc else -1,
+                sfc_verdict=sfc.get("verdict", "") if sfc else "",
+                sfc_score=sfc.get("total_score", -1) if sfc else -1,
+                recommendation=state.recommendation,
+                rec_json=state.recommendation_json or None,
+            )
+            return f"Audit DB logged: row #{row_id}"
+        except Exception as e:
+            logger.debug("[report_engine] Audit DB log skipped: %s", e)
+            return "Audit DB log skipped (non-critical)."
 
     # ── Excel ────────────────────────────────────────────────────────────
 

@@ -331,23 +331,37 @@ wall_street_agent = Agent(
 
 # ── Agent 5: ReportManager ────────────────────────────────────────────────────
 
+# Pre-flight RAG: load the Knowledge store so ReportManager can
+# reference past similar analyses before generating a new report.
+_report_knowledge = None
+try:
+    from tools.knowledge_engine import get_knowledge_store
+    _report_knowledge = get_knowledge_store()
+except Exception:
+    pass  # ChromaDB not available — ReportManager works without RAG
+
 report_manager = Agent(
     name="ReportManager",
     role="Chief Report Officer",
     model=_chat_model(),
     tools=[ReportEngine(output_dir="reports")],
+    knowledge=_report_knowledge,
     instructions=[
         "You generate investment reports ONLY when explicitly asked by the user.",
         "Trigger phrases: '生成报告', '保存报告', 'generate report', 'save report',",
         "  'export', '导出', 'PDF', 'Excel', 'download'.",
         "",
         "WORKFLOW (when triggered):",
-        "  1. Call save_full_report() — this generates Excel + PDF + JSON audit trail.",
-        "  2. The structured recommendation (from DSPy dspy_report.py) is automatically",
+        "  1. If Knowledge is available, FIRST search for similar past analyses",
+        "     to reference prior recommendations and spot trend changes.",
+        "  2. Call save_full_report() — generates Excel + PDF + JSON audit trail.",
+        "     This also auto-embeds the report into ChromaDB for future RAG",
+        "     and logs the decision to the SQLite audit trail.",
+        "  3. The structured recommendation (from DSPy dspy_report.py) is automatically",
         "     included in the report if SharedState.recommendation_json is populated.",
-        "  3. The SFC compliance audit result is automatically included as a badge",
+        "  4. The SFC compliance audit result is automatically included as a badge",
         "     in the PDF and as a separate sheet in the Excel.",
-        "  4. Confirm the file paths to the user.",
+        "  5. Confirm the file paths to the user.",
         "",
         "Do NOT run automatically at the end of every analysis.",
         "Do NOT call report tools during normal Q&A — only when user explicitly requests.",
@@ -356,6 +370,12 @@ report_manager = Agent(
         "  - recommendation_json: {recommendation, target_price, conviction, time_horizon,",
         "    risk_factors, catalysts, reasoning_summary, derivatives_note}",
         "  - sfc_audit_result: {sfc_tone, explainability, risk_disclosure, verdict}",
+        "",
+        "RAG CONTEXT (from ChromaDB via Knowledge):",
+        "  When Knowledge is available, you can search for past analyses of the same",
+        "  ticker. Use this to: (a) note if the recommendation changed from last time,",
+        "  (b) reference prior risk factors that may still be relevant,",
+        "  (c) provide continuity in the report narrative.",
         "",
         "Note for Derivatives: when structured product pricing is added,",
         "the recommendation_json will include Greeks (Delta/Gamma/Vega) and",
