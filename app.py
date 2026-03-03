@@ -1229,6 +1229,43 @@ def load_agents():
     return cio_team, get_tool_registry()
 
 
+def load_agents_dict() -> dict:
+    """Load the individual agents dict for DSPy pipeline routing."""
+    from agents.team_config import AGENTS
+    return AGENTS
+
+
+def _extract_all_tickers(text: str) -> list[str]:
+    """Extract all unique ticker symbols from text for comparison queries."""
+    import re as __re
+    syms: list[str] = []
+    seen: set[str] = set()
+
+    for m in __re.finditer(
+        r"(?<!\w)(\d{1,6})(?:\s+|\.)(?:HK|T|L|SS|SZ|KS|TW|JP)(?!\w)", text, __re.I
+    ):
+        raw = m.group(0).strip().replace(" ", ".")
+        parts = raw.split(".")
+        if len(parts) == 2:
+            num, exch = parts[0], parts[1].upper()
+            if exch == "HK":
+                num = str(int(num)).zfill(4)
+            sym = f"{num}.{exch}"
+        else:
+            sym = raw.upper()
+        if sym not in seen:
+            seen.add(sym)
+            syms.append(sym)
+
+    for mm in _US_TICKER_RE.finditer(text):
+        w = mm.group(1).upper()
+        if w not in _NON_TICKER_WORDS and w not in seen:
+            seen.add(w)
+            syms.append(w)
+
+    return syms
+
+
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## FinAgent CIO")
@@ -1516,15 +1553,14 @@ if prompt:
 
         def _run():
             """
-            Preferred path: Agno stream=True yields RunResponse chunks so we
-            can emit live step/tool/content markers to stdout_q.
-            Fallback: non-streaming with stdout capture (if streaming unsupported).
+            Primary path: DSPy pipeline (deterministic router + parallel agent
+            gathering + DSPy CIO synthesis).
+            Fallback: Agno team.run() if DSPy pipeline fails.
             """
             def _emit(msg: str) -> None:
                 stdout_q.put(msg)
 
             def _scan_chunk(text: str, seen: set) -> None:
-                """Emit markers for any agent names / tool calls found in chunk."""
                 for name in _STEP_MAP:
                     if name in text and name not in seen:
                         seen.add(name)
@@ -1542,17 +1578,102 @@ if prompt:
                             except ValueError:
                                 pass
                         _emit(f"__tool__{kw}{arg}")
-                        break   # one tool emit per chunk is enough
+                        break
 
+            _is_fast = (depth_hint == "fast")
+            has_ticker = _has_numeric_ticker(prompt) or _has_alpha_ticker(prompt)
+            requires_consensus = (not _is_fast) and has_ticker
+            requires_scorecard = any(k in (prompt or "").lower() for k in ("compare", "vs", "versus"))
+
+            # ── DSPy pipeline ─────────────────────────────────────────────
+            try:
+                from dspy_router import route, gather_agent_data, classify_query
+                from dspy_cio import get_synthesizer, render_markdown
+
+                agents_dict = load_agents_dict()
+
+                # Classify query
+                _emit("__agent__QueryAnalyst")
+                query_type = classify_query(prompt, has_ticker)
+                _emit(f"__text__Query type: {query_type}, Level: {depth_hint or 'standard'}")
+
+                level = depth_hint if depth_hint else "standard"
+                is_comparison = (query_type == "COMPARISON")
+                tickers = _extract_all_tickers(prompt) if is_comparison else []
+
+                # Route to agents
+                agent_names = route(level, query_type, has_ticker)
+                _emit(f"__text__Routing to: {', '.join(agent_names) if agent_names else '(CIO only)'}")
+
+                # Gather data in parallel
+                def _on_start(name):
+                    _emit(f"__agent__{name.split(' ')[0]}")
+
+                def _on_done(name):
+                    _emit(f"__text__{name} completed")
+
+                agent_outputs = {}
+                if agent_names:
+                    agent_outputs = gather_agent_data(
+                        query=base_query,
+                        agent_names=agent_names,
+                        agents_dict=agents_dict,
+                        on_agent_start=_on_start,
+                        on_agent_done=_on_done,
+                        is_comparison=is_comparison,
+                        tickers=tickers,
+                    )
+
+                # Synthesize with DSPy
+                _emit("__text__Synthesizing CIO response...")
+                synthesizer = get_synthesizer()
+                dspy_level = "comparison" if is_comparison else level
+                prediction = synthesizer.forward(
+                    query=base_query,
+                    level=dspy_level,
+                    agent_outputs=agent_outputs,
+                )
+                final = render_markdown(prediction, dspy_level)
+                final = _clean_cio_output(final)
+
+                # Validate mandatory sections for stock queries
+                if requires_consensus:
+                    missing_consensus = "Institutional & Expert Consensus" not in final
+                    missing_media = "Media News" not in final and "Latest Media" not in final
+                    if missing_consensus or missing_media:
+                        missing = []
+                        if missing_consensus:
+                            missing.append("🏛️ Institutional & Expert Consensus")
+                        if missing_media:
+                            missing.append("📰 Latest Media News & Sentiment")
+                        _emit(f"__text__Missing sections ({', '.join(missing)}) — DSPy re-synthesis...")
+                        try:
+                            prediction2 = synthesizer.forward(
+                                query=base_query + "\n\nCRITICAL: You MUST include both "
+                                      "🏛️ Institutional & Expert Consensus and "
+                                      "📰 Latest Media News & Sentiment as separate sections.",
+                                level=dspy_level,
+                                agent_outputs=agent_outputs,
+                            )
+                            final = render_markdown(prediction2, dspy_level)
+                            final = _clean_cio_output(final)
+                        except Exception:
+                            _emit("__text__Re-synthesis failed — using initial output.")
+
+                result_q.put(("ok", final or "[No response generated]"))
+                return
+
+            except Exception as dspy_err:
+                import traceback
+                _emit(f"__text__DSPy pipeline error: {dspy_err!s:.80} — falling back to Agno")
+                _emit("__text__Switching to Agno team coordinator...")
+
+            # ── Agno fallback (original path) ─────────────────────────────
             try:
                 team, _ = load_agents()
                 chunks: list[str] = []
                 stream_seen: set[str] = set()
-                _is_fast = (depth_hint == "fast")
-                requires_consensus = (not _is_fast) and (_has_numeric_ticker(prompt) or _has_alpha_ticker(prompt))
-                requires_scorecard = any(k in (prompt or "").lower() for k in ("compare", "vs", "versus"))
 
-                # ── Streaming path ──────────────────────────────────────────
                 try:
                     for chunk in team.run(full_query, stream=True):
                         c = ""
@@ -1562,7 +1683,6 @@ if prompt:
 
                         _scan_chunk(c, stream_seen)
 
-                        # Emit readable content lines for the thinking panel
                         for line in c.split("\n"):
                             line = line.strip()
                             if (30 <= len(line) <= 160
@@ -1574,7 +1694,6 @@ if prompt:
                     raw_final = "".join(chunks).strip()
                     final = _clean_cio_output(raw_final)
 
-                    # Hard enforcement: stock queries MUST include BOTH mandatory sections.
                     missing_consensus = requires_consensus and "Institutional & Expert Consensus" not in final
                     missing_media = requires_consensus and "Media News" not in final and "Latest Media" not in final
                     if missing_consensus or missing_media:
@@ -1583,7 +1702,7 @@ if prompt:
                             missing.append("🏛️ Institutional & Expert Consensus")
                         if missing_media:
                             missing.append("📰 Latest Media News & Sentiment")
-                        _emit(f"__text__Missing mandatory sections ({', '.join(missing)}) — retrying with stricter instruction.")
+                        _emit(f"__text__Missing mandatory sections ({', '.join(missing)}) — retrying.")
                         retry_query = (
                             f"{full_query}\n\n"
                             "CRITICAL FIX: Your previous answer omitted mandatory sections.\n"
@@ -1591,13 +1710,12 @@ if prompt:
                             "## 🏛️ Institutional & Expert Consensus: <SYMBOL>\n"
                             "**Consensus Vote:** 🟢 Bullish: XX% | 🟡 Neutral: XX% | 🔴 Bearish: XX%\n"
                             "Market Sentiment: <...>\n"
-                            "**Wall Street Research:** (bank-by-bank: Goldman, JPM, etc. with rating + target + thesis)\n"
+                            "**Wall Street Research:** (bank-by-bank)\n"
                             "**Synthesis:** 1-2 lines\n\n"
                             "## 📰 Latest Media News & Sentiment\n"
-                            "- [Date] **Source**: Headline (Bloomberg, WSJ, Reuters, CNBC, FT)\n"
+                            "- [Date] **Source**: Headline\n"
                             "Sentiment verdict: Positive/Neutral/Negative\n\n"
-                            "CRITICAL: These are TWO SEPARATE sections. Do NOT merge them.\n"
-                            "Do not include query analysis reports or tool chatter."
+                            "CRITICAL: TWO SEPARATE sections. Do NOT merge them."
                         )
                         try:
                             resp2 = team.run(retry_query)
@@ -1610,20 +1728,14 @@ if prompt:
                         except Exception:
                             _emit("__text__Section retry failed — returning best available answer.")
 
-                    # Hard enforcement: comparison queries MUST include the scorecard table
                     if requires_scorecard and "## 📊 Comparative Analysis" not in final:
-                        _emit("__text__Missing comparative analysis — retrying once with stricter instruction.")
+                        _emit("__text__Missing comparative analysis — retrying.")
                         retry_query = (
                             f"{full_query}\n\n"
-                            "CRITICAL FIX: Your previous answer omitted the mandatory comparison section.\n"
-                            "Re-answer and include EXACTLY this structure:\n"
+                            "CRITICAL FIX: Include EXACTLY:\n"
                             "## 📊 Comparative Analysis\n"
-                            "**Macro & Sector Context:** (3-4 bullets)\n"
-                            "**Financial Performance Comparison:** (table with real numbers, trends with → arrows, Advantage column)\n"
-                            "**Strategic Positioning:** (per-ticker bullets)\n"
-                            "**Recent News & Sentiment:** (per-ticker bullets)\n"
-                            "Then ## 🏛️ Institutional & Expert Consensus + ## 🎯 CIO Verdict.\n"
-                            "Use REAL data from the agents. Do not include tool chatter."
+                            "**Financial Performance Comparison:** (table)\n"
+                            "Then ## 🏛️ + ## 🎯 CIO Verdict.\n"
                         )
                         try:
                             resp3 = team.run(retry_query)
@@ -1638,7 +1750,6 @@ if prompt:
                     result_q.put(("ok", final or "[No response generated]"))
 
                 except Exception:
-                    # ── Non-streaming fallback ──────────────────────────────
                     with _StdoutCapture(stdout_q):
                         resp = team.run(full_query)
                         content = (
@@ -1647,52 +1758,6 @@ if prompt:
                             else str(resp)
                         )
                         cleaned = _clean_cio_output(str(content))
-                        missing_consensus = requires_consensus and "Institutional & Expert Consensus" not in cleaned
-                        missing_media = requires_consensus and "Media News" not in cleaned and "Latest Media" not in cleaned
-                        if missing_consensus or missing_media:
-                            _emit("__text__Missing mandatory sections — retrying with stricter instruction.")
-                            retry_query = (
-                                f"{full_query}\n\n"
-                                "CRITICAL FIX: Include BOTH mandatory sections as SEPARATE ## headers:\n"
-                                "## 🏛️ Institutional & Expert Consensus: <SYMBOL>\n"
-                                "(Consensus Vote + Wall Street Research bank-by-bank + Synthesis)\n"
-                                "## 📰 Latest Media News & Sentiment\n"
-                                "(Tier-1 media headlines + sentiment verdict)\n"
-                                "Do not include query analysis reports or tool chatter."
-                            )
-                            try:
-                                resp2 = team.run(retry_query)
-                                content2 = (
-                                    resp2.content
-                                    if hasattr(resp2, "content") and resp2.content
-                                    else str(resp2)
-                                )
-                                cleaned = _clean_cio_output(str(content2))
-                            except Exception:
-                                _emit("__text__Section retry failed — returning best available answer.")
-
-                        if requires_scorecard and "## 📊 Comparative Analysis" not in cleaned:
-                            _emit("__text__Missing comparative analysis — retrying once with stricter instruction.")
-                            retry_query = (
-                                f"{full_query}\n\n"
-                                "CRITICAL FIX: Include the mandatory structure:\n"
-                                "## 📊 Comparative Analysis\n"
-                                "**Macro & Sector Context:** (bullets)\n"
-                                "**Financial Performance Comparison:** (table with real numbers + Advantage column)\n"
-                                "**Strategic Positioning:** + **Recent News & Sentiment:** (per-ticker)\n"
-                                "Then ## 🏛️ Institutional & Expert Consensus + ## 🎯 CIO Verdict.\n"
-                                "Use REAL data. Do not include tool chatter."
-                            )
-                            try:
-                                resp3 = team.run(retry_query)
-                                content3 = (
-                                    resp3.content
-                                    if hasattr(resp3, "content") and resp3.content
-                                    else str(resp3)
-                                )
-                                cleaned = _clean_cio_output(str(content3))
-                            except Exception:
-                                _emit("__text__Scorecard retry failed — returning best available answer.")
                         result_q.put(("ok", cleaned))
 
             except Exception as exc:

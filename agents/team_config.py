@@ -553,3 +553,14 @@ cio_team = Team(
     # NOTE: add_history_to_context intentionally omitted — no DB backend configured.
     # Conversation history is injected manually via full_query in app.py.
 )
+
+
+# ── Individual agents export (used by dspy_router for parallel execution) ────
+
+AGENTS = {
+    "QueryAnalyst": query_analyst,
+    "MacroAgent": macro_agent,
+    "CompanyAgent": company_agent,
+    "WallStreetAgent": wall_street_agent,
+    "NewsAgent": news_agent,
+}

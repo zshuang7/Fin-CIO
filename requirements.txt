@@ -26,3 +26,6 @@ tavily-python>=0.5.0
 
 # HTTP client for Finnhub + Alpha Vantage direct API calls
 requests>=2.31.0
+
+# DSPy structured prompting and optimization
+dspy>=2.6
