@@ -261,6 +261,57 @@ _SYSTEM_LINE_PREFIXES = (
     "for detailed analytical comparison:",
 )
 
+def _render_audit_badge(placeholder, verdict) -> None:
+    """Render the compliance audit badge as an expandable section.
+
+    Args:
+        placeholder: A Streamlit st.empty() container.
+        verdict: An AuditVerdict instance from audit.schemas.
+    """
+    _FLAG_ICONS = {"pass": "🟢", "warn": "🟡", "fail": "🔴"}
+    grade = verdict.overall_grade
+    score = verdict.overall_score
+    grade_color = (
+        "#4CAF50" if grade in ("A", "B") else
+        "#FF9800" if grade == "C" else
+        "#f44336"
+    )
+
+    with placeholder.expander(
+        f"Compliance Audit: **{grade}** ({score}/100)",
+        expanded=False,
+    ):
+        st.markdown(
+            f"<div style='text-align:center;margin-bottom:8px'>"
+            f"<span style='font-size:2em;font-weight:bold;color:{grade_color}'>{grade}</span>"
+            f"<span style='font-size:1.1em;color:#aaa;margin-left:8px'>{score}/100</span></div>",
+            unsafe_allow_html=True,
+        )
+
+        dims = [
+            ("Factuality", verdict.factuality),
+            ("Compliance", verdict.compliance),
+            ("Logic", verdict.logic),
+            ("Completeness", verdict.completeness),
+        ]
+        for label, dim in dims:
+            icon = _FLAG_ICONS.get(dim.flag, "⚪")
+            bar_pct = dim.score * 4  # 0-25 -> 0-100%
+            bar_color = (
+                "#4CAF50" if dim.flag == "pass" else
+                "#FF9800" if dim.flag == "warn" else
+                "#f44336"
+            )
+            st.markdown(
+                f"**{icon} {label}** — {dim.score}/25\n\n"
+                f"<div style='background:#333;border-radius:4px;height:6px;margin:2px 0 4px 0'>"
+                f"<div style='background:{bar_color};width:{bar_pct}%;height:6px;border-radius:4px'></div>"
+                f"</div>\n\n"
+                f"<span style='color:#aaa;font-size:0.85em'>{dim.reason}</span>",
+                unsafe_allow_html=True,
+            )
+
+
 def _escape_currency(text: str) -> str:
     """
     Prevent Streamlit / KaTeX from mis-parsing currency dollar signs as LaTeX
@@ -1660,7 +1711,10 @@ if prompt:
                         except Exception:
                             _emit("__text__Re-synthesis failed — using initial output.")
 
-                result_q.put(("ok", final or "[No response generated]"))
+                _agent_data_str = "\n---\n".join(
+                    f"[{k}]\n{v}" for k, v in agent_outputs.items() if v
+                )
+                result_q.put(("ok", final or "[No response generated]", _agent_data_str))
                 return
 
             except Exception as dspy_err:
@@ -1747,7 +1801,7 @@ if prompt:
                             final = _clean_cio_output(str(content3))
                         except Exception:
                             _emit("__text__Scorecard retry failed — returning best available answer.")
-                    result_q.put(("ok", final or "[No response generated]"))
+                    result_q.put(("ok", final or "[No response generated]", ""))
 
                 except Exception:
                     with _StdoutCapture(stdout_q):
@@ -1758,10 +1812,10 @@ if prompt:
                             else str(resp)
                         )
                         cleaned = _clean_cio_output(str(content))
-                        result_q.put(("ok", cleaned))
+                        result_q.put(("ok", cleaned, ""))
 
             except Exception as exc:
-                result_q.put(("err", str(exc)))
+                result_q.put(("err", str(exc), ""))
 
         thread = threading.Thread(target=_run, daemon=True)
         thread.start()
@@ -1811,8 +1865,12 @@ if prompt:
 
         # ── Render final response below the collapsed log ─────────────────
         response_text = ""
+        _audit_agent_data = ""
         if not result_q.empty():
-            status, content = result_q.get()
+            _result_tuple = result_q.get()
+            status = _result_tuple[0]
+            content = _result_tuple[1]
+            _audit_agent_data = _result_tuple[2] if len(_result_tuple) > 2 else ""
             if status == "ok":
                 response_text = content
                 st.markdown(_escape_currency(response_text))
@@ -1822,6 +1880,32 @@ if prompt:
         else:
             st.error("Request timed out. Please try again.")
             response_text = "Error: timed out."
+
+        # ── Inline compliance audit (runs in background) ──────────────────
+        if response_text and not response_text.startswith("Error"):
+            _audit_badge_placeholder = st.empty()
+            _audit_q: queue.Queue = queue.Queue()
+            try:
+                from audit import run_audit_async
+                _audit_level = depth_hint if depth_hint else "standard"
+                _audit_thread = run_audit_async(
+                    cio_answer=response_text,
+                    agent_data=_audit_agent_data,
+                    level=_audit_level,
+                    result_queue=_audit_q,
+                )
+                _audit_thread.join(timeout=30)
+                if not _audit_q.empty():
+                    _a_status, _a_payload = _audit_q.get()
+                    if _a_status == "ok":
+                        _render_audit_badge(_audit_badge_placeholder, _a_payload)
+                    else:
+                        _audit_badge_placeholder.caption("Compliance audit unavailable.")
+                else:
+                    _audit_badge_placeholder.caption("Compliance audit timed out.")
+            except Exception as _audit_err:
+                import logging as _alog
+                _alog.getLogger("audit").debug("Audit display error: %s", _audit_err)
 
     st.session_state.messages.append({"role": "assistant", "content": response_text})
 

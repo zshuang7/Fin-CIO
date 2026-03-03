@@ -1,0 +1,215 @@
+"""
+audit/schemas.py — Pydantic models for structural validation of CIO outputs
+and tool engine responses. These run instantly (no LLM) as a pre-flight check.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+# ── Audit verdict models (returned by the LLM judge) ────────────────────────
+
+class DimensionScore(BaseModel):
+    """Score for a single audit dimension (0-25 scale)."""
+    score: int = Field(ge=0, le=25)
+    flag: Literal["pass", "warn", "fail"]
+    reason: str = Field(min_length=1, max_length=300)
+
+
+class AuditVerdict(BaseModel):
+    """Complete audit result across all four compliance dimensions."""
+    overall_grade: Literal["A", "B", "C", "D", "F"]
+    overall_score: int = Field(ge=0, le=100)
+    factuality: DimensionScore
+    compliance: DimensionScore
+    logic: DimensionScore
+    completeness: DimensionScore
+
+    @field_validator("overall_grade", mode="before")
+    @classmethod
+    def _normalize_grade(cls, v: str) -> str:
+        return v.strip().upper()
+
+
+# ── Structural pre-validation (no LLM needed) ───────────────────────────────
+
+_DISCLAIMER_PATTERNS = [
+    r"disclaimer",
+    r"not\s+financial\s+advice",
+    r"educational\s+purposes",
+    r"AI[- ]generated",
+]
+
+_FORBIDDEN_PATTERNS = [
+    r"(?i)^certainly[,!]",
+    r"(?i)^here\s+is\s+the\s+report",
+    r"(?i)^let\s+me\s+analyze",
+    r"(?i)^i'?ll\s+provide",
+    r"(?i)^as\s+requested",
+    r"(?i)^sure[,!]",
+]
+
+LEVEL_REQUIRED_SECTIONS: dict[str, list[str]] = {
+    "fast": [],
+    "standard": [
+        "Institutional & Expert Consensus",
+        "Media News",
+    ],
+    "master": [
+        "Institutional & Expert Consensus",
+        "Media News",
+        "Macro",
+    ],
+    "deep_dive": [
+        "Institutional & Expert Consensus",
+        "Media News",
+        "Macro",
+        "Scenario",
+    ],
+    "comparison": [
+        "Institutional & Expert Consensus",
+        "Media News",
+    ],
+}
+
+
+class StructuralCheckResult(BaseModel):
+    """Result of the instant structural pre-check (no LLM)."""
+    has_disclaimer: bool = False
+    has_forbidden_opener: bool = False
+    missing_sections: list[str] = Field(default_factory=list)
+    word_count: int = 0
+    table_row_count: int = 0
+    passed: bool = False
+    issues: list[str] = Field(default_factory=list)
+
+
+def run_structural_check(text: str, level: str = "standard") -> StructuralCheckResult:
+    """Run instant structural validation on CIO output markdown.
+
+    Returns a StructuralCheckResult with all issues found.
+    """
+    issues: list[str] = []
+
+    # Disclaimer
+    has_disclaimer = any(re.search(p, text, re.I) for p in _DISCLAIMER_PATTERNS)
+    if not has_disclaimer:
+        issues.append("Missing disclaimer / 'not financial advice' statement")
+
+    # Forbidden openers (AI chatter in first 200 chars)
+    first_200 = text[:200]
+    has_forbidden = any(re.search(p, first_200) for p in _FORBIDDEN_PATTERNS)
+    if has_forbidden:
+        issues.append("Contains AI chatter in opening (e.g. 'Certainly', 'Let me analyze')")
+
+    # Required sections
+    required = LEVEL_REQUIRED_SECTIONS.get(level, [])
+    missing = [s for s in required if s not in text]
+    if missing:
+        issues.append(f"Missing required sections: {', '.join(missing)}")
+
+    # Word count
+    wc = len(text.split())
+
+    # Table rows
+    table_rows = len(re.findall(r"^\|.+\|$", text, re.M))
+
+    passed = len(issues) == 0
+
+    return StructuralCheckResult(
+        has_disclaimer=has_disclaimer,
+        has_forbidden_opener=has_forbidden,
+        missing_sections=missing,
+        word_count=wc,
+        table_row_count=table_rows,
+        passed=passed,
+        issues=issues,
+    )
+
+
+# ── Tool output schemas (for unit tests) ────────────────────────────────────
+
+class FmpConsensusOutput(BaseModel):
+    """Expected schema for FmpEngine.get_consensus_data JSON output."""
+    model_config = ConfigDict(extra="allow")
+
+    symbol: str
+    retrieved_at: str
+    source: str
+    vote: dict = Field(default_factory=dict)
+    market_sentiment: str = ""
+
+
+class InstitutionSnippet(BaseModel):
+    """A single bank or media snippet from TavilyEngine."""
+    entity: str
+    date: str = ""
+    url: str = ""
+    takeaway: str = ""
+    tier: int = Field(default=3, ge=1, le=3)
+
+
+class TavilySnippetsOutput(BaseModel):
+    """Expected schema for TavilyEngine.extract_institution_snippets JSON."""
+    model_config = ConfigDict(extra="allow")
+
+    symbol: str
+    retrieved_at: str
+    window_days: int
+    bank_snippets: list[InstitutionSnippet] = Field(default_factory=list)
+    media_snippets: list[InstitutionSnippet] = Field(default_factory=list)
+
+
+class NewsItem(BaseModel):
+    """A single news item from Polygon or NewsData engines."""
+    date: str = ""
+    source: str = ""
+    title: str = ""
+    url: str = ""
+    summary: str = ""
+
+
+class PolygonNewsOutput(BaseModel):
+    """Expected schema for PolygonEngine.get_media_news JSON."""
+    model_config = ConfigDict(extra="allow")
+
+    ticker: str
+    retrieved_at: str
+    source: str = "polygon.io"
+    window_days: int = 30
+    items: list[NewsItem] = Field(default_factory=list)
+
+
+class NewsDataOutput(BaseModel):
+    """Expected schema for NewsDataEngine.get_latest_news JSON."""
+    model_config = ConfigDict(extra="allow")
+
+    query: str
+    retrieved_at: str
+    source: str = "newsdata.io"
+    window_days: int = 30
+    items: list[NewsItem] = Field(default_factory=list)
+
+
+class EodhdSignalsOutput(BaseModel):
+    """Expected schema for EODHDEngine.get_wall_street_signals JSON."""
+    model_config = ConfigDict(extra="allow")
+
+    ticker: str
+    retrieved_at: str
+    consensus: dict = Field(default_factory=dict)
+    bank_votes: list[dict] = Field(default_factory=list)
+    vote_tally: dict = Field(default_factory=dict)
+
+
+class FinanceKeyMetrics(BaseModel):
+    """Expected schema for FinanceEngine.get_key_metrics dict."""
+    model_config = ConfigDict(extra="allow")
+
+    Ticker: str = ""
+    Company: str = ""
+    Price: float | str | None = None

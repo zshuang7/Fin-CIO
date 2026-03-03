@@ -56,48 +56,74 @@ _WORD_COUNT_RANGES = {
 }
 
 
+_DISCLAIMER_MARKERS = [
+    "disclaimer", "not financial advice", "educational purposes",
+    "ai-generated", "ai generated",
+]
+
+_BANK_NAMES_ALL = [
+    "goldman sachs", "jpmorgan", "morgan stanley", "bank of america",
+    "citigroup", "barclays", "ubs", "centerview", "evercore", "lazard",
+    "jefferies", "deutsche bank", "credit suisse", "hsbc", "nomura",
+    "wells fargo", "raymond james", "bernstein", "piper sandler",
+]
+
+_BULLISH_WORDS = ["buy", "bullish", "overweight", "outperform", "strong", "upside", "positive", "growth"]
+_BEARISH_WORDS = ["sell", "bearish", "underweight", "underperform", "downside", "negative", "decline", "risk"]
+
+
 def cio_metric(example: dspy.Example, prediction: dspy.Prediction, trace=None) -> float:
-    """Score a CIO synthesis output on multiple quality axes.
+    """Score a CIO synthesis output on multiple quality + compliance axes.
 
     Returns a float in [0, 1] — higher is better.
+
+    Axes (rebalanced with compliance dimensions):
+      1. Required sections (25%)
+      2. No AI chatter (15%)
+      3. Word count range (15%)
+      4. Narrative quality (10%)
+      5. Decision frame (10%)
+      6. Disclaimer present (10%)          [NEW — compliance]
+      7. No hallucinated banks (5%)         [NEW — compliance]
+      8. Internal consistency (10%)         [NEW — compliance]
     """
     level = example.get("level", "standard")
     rendered = render_markdown(prediction, level)
     score = 0.0
     max_score = 0.0
+    lower = rendered.lower()
 
-    # 1. Required sections present (40% weight)
+    # 1. Required sections present (25%)
     required = _REQUIRED_SECTIONS.get(level, [])
     if required:
-        max_score += 40
+        max_score += 25
         found = sum(1 for s in required if s in rendered)
-        score += 40 * (found / len(required))
+        score += 25 * (found / len(required))
     else:
-        max_score += 40
-        score += 40
+        max_score += 25
+        score += 25
 
-    # 2. No AI chatter (20% weight)
-    max_score += 20
-    lower = rendered.lower()
+    # 2. No AI chatter (15%)
+    max_score += 15
     chatter_count = sum(1 for phrase in _AI_CHATTER if phrase in lower[:200])
     if chatter_count == 0:
-        score += 20
+        score += 15
     elif chatter_count == 1:
-        score += 10
+        score += 7
     # else: 0
 
-    # 3. Word count within range (20% weight)
-    max_score += 20
+    # 3. Word count within range (15%)
+    max_score += 15
     wc = len(rendered.split())
     lo, hi = _WORD_COUNT_RANGES.get(level, (200, 1500))
     if lo <= wc <= hi:
-        score += 20
+        score += 15
     elif wc < lo:
-        score += max(0, 20 * (wc / lo))
+        score += max(0, 15 * (wc / lo))
     else:
-        score += max(0, 20 * (hi / wc))
+        score += max(0, 15 * (hi / wc))
 
-    # 4. Narrative quality — no giant tables (10% weight)
+    # 4. Narrative quality — no giant tables (10%)
     max_score += 10
     table_rows = len(re.findall(r"^\|.+\|$", rendered, re.M))
     if table_rows <= 12:
@@ -106,12 +132,62 @@ def cio_metric(example: dspy.Example, prediction: dspy.Prediction, trace=None) -
         score += 5
     # else: 0
 
-    # 5. Has a decision frame / verdict (10% weight)
+    # 5. Has a decision frame / verdict (10%)
     max_score += 10
     decision_markers = ["how to think about", "suits investors", "decision frame",
                         "fits the", "type of investor", "verdict", "how to own"]
     if any(m in lower for m in decision_markers):
         score += 10
+
+    # 6. Disclaimer present (10%) — compliance
+    max_score += 10
+    if any(m in lower for m in _DISCLAIMER_MARKERS):
+        score += 10
+
+    # 7. No hallucinated banks (5%) — compliance
+    # Banks mentioned in the CIO output should ideally have supporting data.
+    # Without agent_outputs in the metric context, we check that bank names
+    # appear near evidence markers (dates, price targets, ratings).
+    max_score += 5
+    bank_mentions = [b for b in _BANK_NAMES_ALL if b in lower]
+    if not bank_mentions:
+        score += 5  # no banks mentioned → no hallucination risk
+    else:
+        evidence_pattern = re.compile(
+            r"(?:20\d{2}|pt|price target|rating|buy|sell|hold|overweight|underweight|neutral)",
+            re.I,
+        )
+        banks_with_evidence = 0
+        for bank in bank_mentions:
+            idx = lower.find(bank)
+            if idx >= 0:
+                context_window = lower[max(0, idx - 100):idx + len(bank) + 150]
+                if evidence_pattern.search(context_window):
+                    banks_with_evidence += 1
+        ratio = banks_with_evidence / len(bank_mentions)
+        score += 5 * ratio
+
+    # 8. Internal consistency (10%) — compliance
+    # Check that recommendation direction matches the sentiment in the body.
+    max_score += 10
+    bullish_count = sum(1 for w in _BULLISH_WORDS if w in lower)
+    bearish_count = sum(1 for w in _BEARISH_WORDS if w in lower)
+
+    has_buy_rec = any(kw in lower for kw in ["buy", "bullish", "overweight"])
+    has_sell_rec = any(kw in lower for kw in ["sell", "bearish", "underweight"])
+
+    if has_buy_rec and bullish_count >= bearish_count:
+        score += 10  # buy rec + bullish body = consistent
+    elif has_sell_rec and bearish_count >= bullish_count:
+        score += 10  # sell rec + bearish body = consistent
+    elif not has_buy_rec and not has_sell_rec:
+        score += 8  # neutral/hold stance — mild consistency
+    elif has_buy_rec and bearish_count > bullish_count * 2:
+        score += 2  # strong inconsistency
+    elif has_sell_rec and bullish_count > bearish_count * 2:
+        score += 2  # strong inconsistency
+    else:
+        score += 6  # mild mismatch
 
     return score / max_score if max_score > 0 else 0.0
 

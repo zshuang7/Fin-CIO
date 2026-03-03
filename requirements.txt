@@ -29,3 +29,8 @@ requests>=2.31.0
 
 # DSPy structured prompting and optimization
 dspy>=2.6
+
+# Audit & testing
+pydantic>=2.0
+openai>=1.0
+pytest>=8.0
