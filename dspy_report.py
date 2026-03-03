@@ -4,7 +4,10 @@ dspy_report.py — DSPy-powered structured recommendation + SFC compliance judge
 Converts the ReportManager's free-text recommendation into a compilable DSPy
 pipeline that produces:
   1. Structured JSON recommendation (auditable, typed fields)
-  2. SFC compliance self-check (using a second DeepSeek call as LLM-as-a-judge)
+  2. SFC compliance check via GPT-4o (independent judge — NOT DeepSeek)
+
+IMPORTANT: The SFC judge uses GPT-4o exclusively. DeepSeek (the CIO model)
+must NOT judge its own output — that would be self-evaluation.
 
 The structured output feeds into:
   - SharedState.recommendation_json (for Excel/PDF export via ReportEngine)
@@ -166,7 +169,7 @@ class ReportSynthesizer(dspy.Module):
     def __init__(self):
         super().__init__()
         self.recommend = dspy.ChainOfThought(StructuredRecommendation)
-        self.sfc_judge = dspy.ChainOfThought(SFCComplianceCheck)
+        # SFC judge deliberately NOT using DSPy/DeepSeek — uses GPT-4o via audit/judge.py
 
     def forward(
         self,
@@ -216,36 +219,36 @@ class ReportSynthesizer(dspy.Module):
             "timestamp": datetime.now().isoformat(),
         }
 
-        # Step 2: SFC compliance check (second LLM call)
+        # Step 2: SFC compliance check via GPT-4o (independent judge)
+        # IMPORTANT: Uses GPT-4o, NOT DeepSeek — the CIO model must not
+        # judge its own output.
         if run_sfc_check:
             try:
+                from audit.judge import run_sfc_judge
                 rec_json_str = json.dumps(recommendation_json, ensure_ascii=False, indent=2)
-                # Truncate CIO analysis for judge context
                 truncated = cio_analysis[:6000] if len(cio_analysis) > 6000 else cio_analysis
 
-                sfc_pred = self.sfc_judge(
-                    recommendation_json=rec_json_str,
-                    cio_analysis=truncated,
-                )
+                sfc_result = run_sfc_judge(truncated, rec_json_str)
 
-                sfc_verdict = {
-                    "sfc_tone": sfc_pred.sfc_tone_score.strip(),
-                    "explainability": sfc_pred.explainability_score.strip(),
-                    "risk_disclosure": sfc_pred.risk_disclosure_score.strip(),
-                    "overall_verdict": sfc_pred.overall_sfc_verdict.strip(),
-                    "remediation": sfc_pred.remediation.strip(),
-                    "judged_at": datetime.now().isoformat(),
-                }
-                result["sfc_verdict"] = sfc_verdict
+                if sfc_result is not None:
+                    sfc_verdict = {
+                        "sfc_tone": sfc_result.get("sfc_tone", {}),
+                        "explainability": sfc_result.get("explainability", {}),
+                        "risk_disclosure": sfc_result.get("risk_disclosure", {}),
+                        "total_score": sfc_result.get("total_score", 0),
+                        "verdict": sfc_result.get("verdict", "REVIEW"),
+                        "remediation": sfc_result.get("remediation", ""),
+                        "judged_at": datetime.now().isoformat(),
+                        "judge_model": "gpt-4o",
+                    }
+                    result["sfc_verdict"] = sfc_verdict
 
-                logger.info(
-                    "SFC audit for %s: %s | Tone=%s, Explain=%s, Risk=%s",
-                    ticker,
-                    sfc_verdict["overall_verdict"],
-                    sfc_verdict["sfc_tone"],
-                    sfc_verdict["explainability"],
-                    sfc_verdict["risk_disclosure"],
-                )
+                    logger.info(
+                        "SFC audit (GPT-4o) for %s: %s (%d/30)",
+                        ticker,
+                        sfc_verdict["verdict"],
+                        sfc_verdict["total_score"],
+                    )
             except Exception as exc:
                 logger.error("SFC compliance check failed for %s: %s", ticker, exc)
 

@@ -262,7 +262,12 @@ _SYSTEM_LINE_PREFIXES = (
 )
 
 def _render_audit_badge(placeholder, verdict) -> None:
-    """Render the compliance audit badge as an expandable section.
+    """Render the compliance audit badge with detailed GPT-4o analysis.
+
+    Shows:
+      1. Overall grade with color-coded header
+      2. Four general compliance dimensions with progress bars and detailed reasons
+      3. HK SFC regulatory compliance section (3 dimensions + verdict + remediation)
 
     Args:
         placeholder: A Streamlit st.empty() container.
@@ -277,14 +282,28 @@ def _render_audit_badge(placeholder, verdict) -> None:
         "#f44336"
     )
 
+    judge_label = "GPT-4o" if score != 76 and score != 81 else "Structural"
+
     with placeholder.expander(
-        f"Compliance Audit: **{grade}** ({score}/100)",
+        f"Compliance Audit ({judge_label}): **{grade}** ({score}/100)",
         expanded=False,
     ):
+        # ── Header ────────────────────────────────────────────────────────
         st.markdown(
-            f"<div style='text-align:center;margin-bottom:8px'>"
-            f"<span style='font-size:2em;font-weight:bold;color:{grade_color}'>{grade}</span>"
-            f"<span style='font-size:1.1em;color:#aaa;margin-left:8px'>{score}/100</span></div>",
+            f"<div style='text-align:center;margin-bottom:12px;padding:8px;border-radius:8px;"
+            f"background:linear-gradient(135deg, {grade_color}22, {grade_color}08)'>"
+            f"<span style='font-size:2.2em;font-weight:bold;color:{grade_color}'>{grade}</span>"
+            f"<span style='font-size:1.2em;color:#aaa;margin-left:10px'>{score}/100</span><br/>"
+            f"<span style='font-size:0.8em;color:#777'>Independent Judge: {judge_label}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        # ── General Compliance (4 dimensions) ─────────────────────────────
+        st.markdown(
+            "<div style='font-size:0.95em;font-weight:600;color:#ddd;"
+            "margin:8px 0 6px 0;border-bottom:1px solid #444;padding-bottom:4px'>"
+            "General Compliance</div>",
             unsafe_allow_html=True,
         )
 
@@ -296,7 +315,7 @@ def _render_audit_badge(placeholder, verdict) -> None:
         ]
         for label, dim in dims:
             icon = _FLAG_ICONS.get(dim.flag, "⚪")
-            bar_pct = dim.score * 4  # 0-25 -> 0-100%
+            bar_pct = dim.score * 4
             bar_color = (
                 "#4CAF50" if dim.flag == "pass" else
                 "#FF9800" if dim.flag == "warn" else
@@ -304,12 +323,72 @@ def _render_audit_badge(placeholder, verdict) -> None:
             )
             st.markdown(
                 f"**{icon} {label}** — {dim.score}/25\n\n"
-                f"<div style='background:#333;border-radius:4px;height:6px;margin:2px 0 4px 0'>"
-                f"<div style='background:{bar_color};width:{bar_pct}%;height:6px;border-radius:4px'></div>"
-                f"</div>\n\n"
-                f"<span style='color:#aaa;font-size:0.85em'>{dim.reason}</span>",
+                f"<div style='background:#333;border-radius:4px;height:6px;margin:2px 0 6px 0'>"
+                f"<div style='background:{bar_color};width:{bar_pct}%;height:6px;"
+                f"border-radius:4px'></div></div>\n\n"
+                f"<div style='color:#bbb;font-size:0.85em;line-height:1.4;"
+                f"margin-bottom:10px;padding-left:4px'>{dim.reason}</div>",
                 unsafe_allow_html=True,
             )
+
+        # ── SFC Regulatory Compliance ─────────────────────────────────────
+        sfc = getattr(verdict, "sfc_audit", None)
+        if sfc and isinstance(sfc, dict):
+            sfc_total = sfc.get("total_score", 0)
+            sfc_verdict = sfc.get("verdict", "N/A")
+            sfc_color = (
+                "#4CAF50" if sfc_verdict == "PASS" else
+                "#FF9800" if sfc_verdict == "REVIEW" else
+                "#f44336"
+            )
+
+            st.markdown(
+                f"<div style='font-size:0.95em;font-weight:600;color:#ddd;"
+                f"margin:14px 0 6px 0;border-bottom:1px solid #444;padding-bottom:4px'>"
+                f"HK SFC Regulatory Compliance — "
+                f"<span style='color:{sfc_color}'>{sfc_verdict}</span> ({sfc_total}/30)</div>",
+                unsafe_allow_html=True,
+            )
+
+            sfc_dims = [
+                ("SFC Tone", sfc.get("sfc_tone", {})),
+                ("Explainability", sfc.get("explainability", {})),
+                ("Risk Disclosure", sfc.get("risk_disclosure", {})),
+            ]
+            for sfc_label, sfc_dim in sfc_dims:
+                if isinstance(sfc_dim, dict):
+                    s = sfc_dim.get("score", 0)
+                    r = sfc_dim.get("reason", "")
+                else:
+                    s, r = 0, ""
+                sfc_bar_pct = s * 10
+                sfc_bar_color = "#4CAF50" if s >= 8 else "#FF9800" if s >= 5 else "#f44336"
+                sfc_icon = "🟢" if s >= 8 else "🟡" if s >= 5 else "🔴"
+                st.markdown(
+                    f"**{sfc_icon} {sfc_label}** — {s}/10\n\n"
+                    f"<div style='background:#333;border-radius:4px;height:5px;margin:2px 0 6px 0'>"
+                    f"<div style='background:{sfc_bar_color};width:{sfc_bar_pct}%;height:5px;"
+                    f"border-radius:4px'></div></div>\n\n"
+                    f"<div style='color:#bbb;font-size:0.85em;line-height:1.4;"
+                    f"margin-bottom:8px;padding-left:4px'>{r}</div>",
+                    unsafe_allow_html=True,
+                )
+
+            remediation = sfc.get("remediation", "")
+            if remediation and remediation.lower() != "none required":
+                st.markdown(
+                    f"<div style='background:#f4433611;border-left:3px solid #f44336;"
+                    f"padding:8px 12px;margin:8px 0;border-radius:4px'>"
+                    f"<span style='font-size:0.85em;color:#ff8a80'>"
+                    f"<b>Remediation Required:</b> {remediation}</span></div>",
+                    unsafe_allow_html=True,
+                )
+            elif sfc_verdict == "PASS":
+                st.markdown(
+                    "<div style='color:#66bb6a;font-size:0.85em;margin:6px 0'>"
+                    "No remediation required — SFC compliance standards met.</div>",
+                    unsafe_allow_html=True,
+                )
 
 
 def _escape_currency(text: str) -> str:

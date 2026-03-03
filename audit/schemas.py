@@ -17,7 +17,7 @@ class DimensionScore(BaseModel):
     """Score for a single audit dimension (0-25 scale)."""
     score: int = Field(ge=0, le=25)
     flag: Literal["pass", "warn", "fail"]
-    reason: str = Field(min_length=1, max_length=300)
+    reason: str = Field(min_length=1, max_length=800)
 
 
 class SFCDimensionScore(BaseModel):

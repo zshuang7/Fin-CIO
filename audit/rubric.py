@@ -96,14 +96,20 @@ Evaluate the answer on EXACTLY four dimensions, each scored 0-25:
 - D: 40-54
 - F: 0-39
 
-You MUST respond with valid JSON matching this exact structure:
+You MUST respond with valid JSON matching this exact structure.
+CRITICAL: Each "reason" MUST be 2-4 specific sentences, NOT generic one-liners.
+Cite exact data points, quote specific phrases, or name missing elements.
+
+Example of a BAD reason: "Disclaimer present."
+Example of a GOOD reason: "The analysis includes 'AI-generated analysis. Not financial advice.' disclaimer at the end. However, risk warnings could be more prominent — they appear only in the final section rather than alongside the BUY recommendation where they'd be most useful."
+
 {{
   "overall_grade": "A"|"B"|"C"|"D"|"F",
   "overall_score": <int 0-100>,
-  "factuality": {{"score": <int 0-25>, "flag": "pass"|"warn"|"fail", "reason": "<1 sentence>"}},
-  "compliance": {{"score": <int 0-25>, "flag": "pass"|"warn"|"fail", "reason": "<1 sentence>"}},
-  "logic": {{"score": <int 0-25>, "flag": "pass"|"warn"|"fail", "reason": "<1 sentence>"}},
-  "completeness": {{"score": <int 0-25>, "flag": "pass"|"warn"|"fail", "reason": "<1 sentence>"}}
+  "factuality": {{"score": <int 0-25>, "flag": "pass"|"warn"|"fail", "reason": "<2-4 sentences citing specific data>"}},
+  "compliance": {{"score": <int 0-25>, "flag": "pass"|"warn"|"fail", "reason": "<2-4 sentences with quotes>"}},
+  "logic": {{"score": <int 0-25>, "flag": "pass"|"warn"|"fail", "reason": "<2-4 sentences on reasoning>"}},
+  "completeness": {{"score": <int 0-25>, "flag": "pass"|"warn"|"fail", "reason": "<2-4 sentences on coverage>"}}
 }}
 
 Flag thresholds: pass >= 18, warn 12-17, fail < 12.

@@ -1,8 +1,11 @@
 """
-audit — Three-layer compliance audit system for Fin-CIO.
+audit — Independent compliance audit system for Fin-CIO.
 
-Layer 1: Real-time GPT-4o judge with inline badge
-Layer 2: Structural Pydantic validation (instant, no LLM)
+IMPORTANT: All LLM-as-a-judge calls use GPT-4o exclusively.
+DeepSeek is the CIO brain — it MUST NOT judge its own output.
+
+Layer 1: Structural Pydantic validation (instant, no LLM)
+Layer 2: GPT-4o unified judge (general compliance + HK SFC regulatory)
 Layer 3: DSPy metric integration (in optimize.py)
 
 Usage:
