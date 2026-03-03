@@ -44,11 +44,7 @@ class FinanceEngine(BaseTool):
         self.register(self.get_balance_sheet)
         self.register(self.get_cash_flow)
         self.register(self.get_key_metrics)
-
-        # ════════════════════════════════════════════════════════════════
-        # 在此处添加新的 API Key（yfinance 无需 key，其他数据源在此配置）
-        # 例如: self.alpha_vantage_key = os.getenv("ALPHA_VANTAGE_API_KEY")
-        # ════════════════════════════════════════════════════════════════
+        self.register(self.get_risk_metrics)
 
     # ── Public tool functions ────────────────────────────────────────────
 
@@ -247,6 +243,121 @@ class FinanceEngine(BaseTool):
         except Exception as e:
             logger.error(f"[finance_engine] get_key_metrics({ticker}): {e}")
             return {"error": str(e)}
+
+    def get_risk_metrics(self, ticker: str, period: str = "1y") -> str:
+        """Compute quantitative risk metrics using pandas/numpy.
+
+        Calculates moving averages, annualized volatility at multiple windows,
+        max drawdown, and an approximate Sharpe ratio. Results are written to
+        SharedState.risk_metrics for downstream use by CIO and ReportManager.
+
+        Args:
+            ticker: Stock ticker symbol, e.g. 'TSLA', '0700.HK'.
+            period: yfinance period string (default '1y'). Use '2y' for
+                    200-day MA to have enough history.
+
+        Returns:
+            Formatted text summary of risk metrics.
+
+        Note for Derivatives (Black-Scholes ready):
+            The annualized volatility (Vol_252d) computed here is the key input
+            for Black-Scholes option pricing (sigma). When derivatives pricing
+            is added, Delta / Gamma / Vega can be computed from:
+              - S = current price (from get_key_metrics)
+              - sigma = Vol_252d (from this function)
+              - r = risk-free rate (from Alpha Vantage / FRED)
+              - T = time to expiry
+              - K = strike price
+            See: https://en.wikipedia.org/wiki/Black%E2%80%93Scholes_model
+        """
+        import numpy as np
+        import pandas as pd
+
+        try:
+            tk = _yf().Ticker(ticker)
+            hist: pd.DataFrame = tk.history(period=period, auto_adjust=True)
+
+            if hist.empty or len(hist) < 20:
+                return f"Insufficient price history for {ticker} (need ≥20 trading days)."
+
+            close: pd.Series = hist["Close"]
+            daily_returns: pd.Series = close.pct_change().dropna()
+
+            # ── Moving Averages ──────────────────────────────────────────
+            ma_20 = close.rolling(20).mean().iloc[-1] if len(close) >= 20 else None
+            ma_50 = close.rolling(50).mean().iloc[-1] if len(close) >= 50 else None
+            ma_200 = close.rolling(200).mean().iloc[-1] if len(close) >= 200 else None
+
+            # ── Annualized Volatility (σ√252) at different windows ───────
+            sqrt_252 = float(np.sqrt(252))
+            vol_30d = float(daily_returns.tail(30).std() * sqrt_252) if len(daily_returns) >= 30 else None
+            vol_60d = float(daily_returns.tail(60).std() * sqrt_252) if len(daily_returns) >= 60 else None
+            vol_252d = float(daily_returns.std() * sqrt_252)
+
+            # ── Max Drawdown ─────────────────────────────────────────────
+            cumulative = (1 + daily_returns).cumprod()
+            running_max = cumulative.cummax()
+            drawdowns = (cumulative - running_max) / running_max
+            max_dd = float(drawdowns.min())
+            max_dd_date = str(drawdowns.idxmin().date()) if not drawdowns.empty else "N/A"
+
+            # ── Approximate Sharpe (assuming risk-free ≈ 4.5% for USD) ───
+            # Note: replace with actual risk-free rate from FRED / Alpha Vantage
+            rf_annual = 0.045
+            mean_annual = float(daily_returns.mean() * 252)
+            sharpe = (mean_annual - rf_annual) / vol_252d if vol_252d > 0 else None
+
+            current_price = float(close.iloc[-1])
+
+            metrics = {
+                "ticker": ticker.upper(),
+                "period": period,
+                "current_price": round(current_price, 2),
+                "MA_20": round(float(ma_20), 2) if ma_20 is not None else "N/A (< 20 days)",
+                "MA_50": round(float(ma_50), 2) if ma_50 is not None else "N/A (< 50 days)",
+                "MA_200": round(float(ma_200), 2) if ma_200 is not None else "N/A (< 200 days)",
+                "Vol_30d": f"{vol_30d:.1%}" if vol_30d is not None else "N/A",
+                "Vol_60d": f"{vol_60d:.1%}" if vol_60d is not None else "N/A",
+                "Vol_252d": f"{vol_252d:.1%}",
+                "Max_Drawdown": f"{max_dd:.1%}",
+                "Max_Drawdown_Date": max_dd_date,
+                "Sharpe_Approx": round(sharpe, 2) if sharpe is not None else "N/A",
+                "trading_days": len(daily_returns),
+            }
+
+            # Write to SharedState for Excel export / CIO synthesis
+            get_state().risk_metrics = metrics
+
+            # ── Format output ────────────────────────────────────────────
+            price_vs_ma = ""
+            if ma_50 is not None:
+                pct_vs_50 = (current_price / float(ma_50) - 1) * 100
+                price_vs_ma = f"  Price vs 50-MA  : {pct_vs_50:+.1f}%\n"
+            if ma_200 is not None:
+                pct_vs_200 = (current_price / float(ma_200) - 1) * 100
+                price_vs_ma += f"  Price vs 200-MA : {pct_vs_200:+.1f}%"
+
+            lines = [
+                f"{'=' * 55}",
+                f"  Risk Metrics — {ticker.upper()} ({period})",
+                f"{'=' * 55}",
+                f"  Current Price   : {current_price:.2f}",
+                f"  20-day MA       : {metrics['MA_20']}",
+                f"  50-day MA       : {metrics['MA_50']}",
+                f"  200-day MA      : {metrics['MA_200']}",
+                price_vs_ma,
+                f"  Vol (30d ann.)  : {metrics['Vol_30d']}",
+                f"  Vol (60d ann.)  : {metrics['Vol_60d']}",
+                f"  Vol (252d ann.) : {metrics['Vol_252d']}  ← Black-Scholes σ input",
+                f"  Max Drawdown    : {metrics['Max_Drawdown']} (on {max_dd_date})",
+                f"  Sharpe (approx) : {metrics['Sharpe_Approx']}  (rf=4.5%)",
+                f"  Trading Days    : {metrics['trading_days']}",
+            ]
+            return "\n".join(l for l in lines if l)
+
+        except Exception as e:
+            logger.error(f"[finance_engine] get_risk_metrics({ticker}): {e}")
+            return f"Error computing risk metrics for {ticker}: {e}"
 
     # ── Private helpers ──────────────────────────────────────────────────
 

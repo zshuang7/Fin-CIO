@@ -34,6 +34,13 @@ class SharedState:
     cashflow_data: dict = field(default_factory=dict)
     balance_sheet_data: dict = field(default_factory=dict)
 
+    # ── Risk metrics (computed by FinanceEngine.get_risk_metrics) ────────
+    # Keys: MA_20, MA_50, MA_200, Vol_30d, Vol_60d, Vol_252d,
+    #        Max_Drawdown, Max_Drawdown_Period, Sharpe_Approx, ticker, period
+    # Note for Derivatives: these feed into Delta/Gamma/Vega calculations
+    # when Black-Scholes pricing is added (see finance_engine.py).
+    risk_metrics: dict = field(default_factory=dict)
+
     # ── CIO synthesis (written by the CIO / Team coordinator) ───────────
     cio_reasoning: str = ""         # R1 chain-of-thought text
     recommendation: str = ""        # "BUY" | "HOLD" | "SELL"
@@ -77,6 +84,8 @@ class SharedState:
             sheets["Cash Flow"] = self.cashflow_data
         if self.balance_sheet_data:
             sheets["Balance Sheet"] = self.balance_sheet_data
+        if self.risk_metrics:
+            sheets["Risk Metrics"] = self.risk_metrics
         if self.news_headlines:
             sheets["News"] = [{"Headline": h} for h in self.news_headlines]
         return sheets

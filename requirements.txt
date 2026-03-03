@@ -9,6 +9,7 @@ litellm>=1.55.0
 
 # Financial data
 yfinance>=0.2.54
+numpy>=1.26.0
 
 # Report generation
 pandas>=2.2.0
